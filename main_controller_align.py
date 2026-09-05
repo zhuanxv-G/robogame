@@ -1,6 +1,8 @@
 import serial
 import time
 
+from arm_sequence import ArmSequence
+
 
 # ============================================================
 # 串口配置
@@ -96,12 +98,29 @@ STATUS_PRINT_INTERVAL = 0.25
 
 
 # ============================================================
+# 机械臂整合安全开关
+# ============================================================
+
+# 第一版禁止 READY 自动进入 ARM_BUILD。
+AUTO_ARM_BUILD = False
+
+# READY 停车并收到 ACK 后，在当前进程中等待用户按 b。
+MANUAL_ARM_BUILD_TEST = True
+
+# 视觉主控默认不执行固定预抬升；独立 build_sequence.py 仍会执行。
+ARM_STARTUP_RAISE_ENABLED = False
+
+
+# ============================================================
 # 控制状态
 # ============================================================
 
 STATE_ALIGN = "ALIGN"
 STATE_APPROACH = "APPROACH"
 STATE_READY = "READY"
+STATE_ARM_BUILD = "ARM_BUILD"
+STATE_BUILD_DONE = "BUILD_DONE"
+STATE_ERROR = "ERROR"
 STATE_STOP = "STOP"
 
 
@@ -129,6 +148,10 @@ stm32 = serial.Serial(
 )
 
 print("STM32 connected")
+
+
+# ArmSequence复用主控唯一的STM32串口，不会自己打开串口。
+arm = ArmSequence(stm32)
 
 
 # 清理旧数据
@@ -275,6 +298,20 @@ def parse_k230(data):
     return None
 
 
+def wait_for_manual_arm_build():
+    """Block safely in READY until the operator explicitly presses b."""
+    while True:
+        choice = input(
+            "\nREADY FOR ARM BUILD - "
+            "press b to run, or Ctrl+C to exit: "
+        ).strip().lower()
+
+        if choice == "b":
+            return True
+
+        print("Arm build not started. Press b to confirm.")
+
+
 # ============================================================
 # 启动
 # ============================================================
@@ -287,7 +324,8 @@ print()
 print("Control strategy:")
 print("  ALIGN    -> rotate only")
 print("  APPROACH -> forward only")
-print("  READY    -> STOP")
+print("  READY    -> STOP and wait for manual arm trigger")
+print("  ARM_BUILD -> BUILD_DONE")
 print()
 print("No diagonal X+Y motion.")
 print()
@@ -326,6 +364,11 @@ last_status_print_time = 0.0
 # 是否已经因为超时停车
 stopped = True
 
+# READY只执行一次STOP确认，ARM_BUILD只执行一次。
+ready_stop_acknowledged = False
+arm_build_started = False
+arm_startup_raise_done = False
+
 
 # ============================================================
 # 主循环
@@ -334,6 +377,54 @@ stopped = True
 try:
 
     while True:
+
+        # ====================================================
+        # ARM_BUILD独占STM32回复读取权，并且只执行一次。
+        # 此阶段不读取/处理K230D，也不发送任何底盘运动命令。
+        # ====================================================
+
+        if state == STATE_ARM_BUILD:
+
+            if not arm_build_started:
+
+                arm_build_started = True
+
+                print()
+                print("==========================")
+                print("ARM BUILD START")
+                print("==========================")
+                print()
+
+                if (
+                    ARM_STARTUP_RAISE_ENABLED
+                    and not arm_startup_raise_done
+                ):
+
+                    arm.startup_raise()
+                    arm_startup_raise_done = True
+
+                arm.run_all()
+
+                # BUILD_DONE继续明确保持底盘停止。
+                arm.stop(require_ack=True)
+                stopped = True
+                state = STATE_BUILD_DONE
+
+                print()
+                print("==========================")
+                print("BUILD COMPLETE")
+                print("==========================")
+                print()
+
+            continue
+
+
+        # BUILD_DONE为第一版终态：不再处理视觉或产生运动。
+        if state == STATE_BUILD_DONE:
+
+            time.sleep(0.05)
+            continue
+
 
         data = None
 
@@ -374,7 +465,14 @@ try:
                 if result["target"]:
 
                     last_target_time = now
-                    stopped = False
+
+                    if state in (
+                        STATE_STOP,
+                        STATE_ALIGN,
+                        STATE_APPROACH
+                    ):
+
+                        stopped = False
 
 
                     error_x = result["error_x"]
@@ -576,20 +674,44 @@ try:
                     elif state == STATE_READY:
 
                         # ---------------------------------------------
-                        # 已达到抓取位置
-                        #
-                        # 使用真正STOP，不继续发VEL。
+                        # 已达到抓取位置：
+                        # 先STOP并由ArmSequence独占读取ACK,STOP。
+                        # ACK确认前不能进入机械臂阶段。
                         # ---------------------------------------------
 
-                        if not stopped:
+                        if not ready_stop_acknowledged:
 
-                            stop_robot()
+                            arm.stop(require_ack=True)
 
                             stopped = True
+                            ready_stop_acknowledged = True
+
+                            print()
+                            print("==========================")
+                            print("READY FOR ARM BUILD")
+                            print("==========================")
+                            print()
+
+                            if AUTO_ARM_BUILD:
+
+                                state = STATE_ARM_BUILD
+
+                            elif (
+                                MANUAL_ARM_BUILD_TEST
+                                and wait_for_manual_arm_build()
+                            ):
+
+                                state = STATE_ARM_BUILD
 
                         cmd = "STOP"
 
-                        motion = "READY"
+                        if state == STATE_ARM_BUILD:
+
+                            motion = "ARM_BUILD_PENDING"
+
+                        else:
+
+                            motion = "READY"
 
 
                     else:
@@ -732,8 +854,39 @@ try:
 
 except KeyboardInterrupt:
 
+    state = STATE_ERROR
+
     print()
-    print("Ctrl+C -> STOP")
+    print("Ctrl+C -> ERROR -> STOP")
+
+    try:
+
+        arm.stop()
+
+    except Exception:
+
+        pass
+
+
+# ============================================================
+# 运行异常
+# ============================================================
+
+except Exception as e:
+
+    state = STATE_ERROR
+
+    print()
+    print("Controller error -> ERROR -> STOP")
+    print(e)
+
+    try:
+
+        arm.stop()
+
+    except Exception:
+
+        pass
 
 
 # ============================================================
