@@ -10,7 +10,14 @@ logs/
 # Temporary files
 *.tmp
 *.temp
+*.bak
 *~
+
+# Project runtime output
+output/
+outputs/
+screenshots/
+captures/
 
 # Python environments
 .venv/
@@ -21,6 +28,10 @@ env/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# Local editor settings
+.vscode/
+.idea/
 
 # OS generated files
 .DS_Store
