@@ -1,7 +1,7 @@
-"""Semantic AprilTag map for the RoboGame field."""
+"""RoboGame 比赛场地的 AprilTag 语义地图。"""
 
 
-# x, y and yaw are reserved for field calibration data added in a later stage.
+# x、y、yaw、tag_size 暂时留空，完成场地标定后可直接填入。
 TAG_MAP = {
     1: {
         "name": "start_zone",
@@ -9,20 +9,23 @@ TAG_MAP = {
         "x": None,
         "y": None,
         "yaw": None,
+        "tag_size": None,
     },
     2: {
         "name": "orange_material",
-        "purpose": "橙色材料区",
+        "purpose": "橙色建筑材料区",
         "x": None,
         "y": None,
         "yaw": None,
+        "tag_size": None,
     },
     3: {
         "name": "purple_material",
-        "purpose": "紫色材料区",
+        "purpose": "紫色建筑材料区",
         "x": None,
         "y": None,
         "yaw": None,
+        "tag_size": None,
     },
     4: {
         "name": "build_zone",
@@ -30,6 +33,7 @@ TAG_MAP = {
         "x": None,
         "y": None,
         "yaw": None,
+        "tag_size": None,
     },
     5: {
         "name": "right_area_reference",
@@ -37,6 +41,7 @@ TAG_MAP = {
         "x": None,
         "y": None,
         "yaw": None,
+        "tag_size": None,
     },
     6: {
         "name": "bottom_area_reference",
@@ -44,5 +49,6 @@ TAG_MAP = {
         "x": None,
         "y": None,
         "yaw": None,
+        "tag_size": None,
     },
 }
