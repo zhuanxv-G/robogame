@@ -68,7 +68,7 @@ robogame/
 │   └── navigation_state.py        # 导航状态定义
 ├── strategy/
 │   └── mission.py                 # 旧任务顺序和元数据
-├── docs/                          # 状态、架构、协议、环境和场地文档
+├── docs/                          # 状态、架构、环境和场地文档
 ├── tests/                         # 人工硬件诊断脚本，并非自动化测试套件
 ├── legacy/                        # 历史主控和旧协议原型
 ├── arm_sequence.py                # 已验证机械臂动作序列
@@ -82,7 +82,6 @@ robogame/
 
 - [当前工程状态](docs/CURRENT_STATUS.md)
 - [软件架构](docs/SOFTWARE_ARCHITECTURE.md)
-- [Pi 与 STM32 通信协议](docs/PI_STM32_PROTOCOL.md)
 - [场地信息](docs/FIELD_DESCRIPTION.md)
 - [Raspberry Pi 环境与部署](docs/PI_ENV.md)
 - [测试脚本说明](tests/README.md)
