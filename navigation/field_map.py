@@ -2,12 +2,12 @@
 
 from typing import TypedDict
 
-from .tag_map import TAG_MAP
+from .field_model import FIELD_INFO, TAG_MAP as WORLD_TAG_MAP
 
 
-LINE_WIDTH_CM = 5.0
-APRILTAG_SIZE_CM = (15.0, 15.0)
-TAG_HEIGHT_CM = 40.0
+LINE_WIDTH_CM = float(FIELD_INFO["line_width_cm"])
+APRILTAG_SIZE_CM = tuple(FIELD_INFO["tag_size_cm"])
+TAG_HEIGHT_CM = float(FIELD_INFO["tag_top_edge_height_cm"])
 
 
 class ZoneInfo(TypedDict):
@@ -17,14 +17,10 @@ class ZoneInfo(TypedDict):
     task: str
 
 
-# 区域名称复用 TAG_MAP，避免两个地图中的 Tag 名称不一致。
+# 区域名称和任务从统一世界模型派生，保持旧查询接口不变。
 TAG_ZONES: dict[int, ZoneInfo] = {
-    1: {"name": str(TAG_MAP[1]["name"]), "task": "initialize"},
-    2: {"name": str(TAG_MAP[2]["name"]), "task": "collect_orange"},
-    3: {"name": str(TAG_MAP[3]["name"]), "task": "collect_purple"},
-    4: {"name": str(TAG_MAP[4]["name"]), "task": "build"},
-    5: {"name": str(TAG_MAP[5]["name"]), "task": "localize"},
-    6: {"name": str(TAG_MAP[6]["name"]), "task": "localize"},
+    tag_id: {"name": str(tag_info["name"]), "task": str(tag_info["task"])}
+    for tag_id, tag_info in WORLD_TAG_MAP.items()
 }
 
 
