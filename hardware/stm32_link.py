@@ -132,6 +132,23 @@ class Stm32Link:
         serial_connection.flush()
         return command
 
+    def write(self, data: bytes) -> int | None:
+        """Forward bytes for compatibility with the existing ArmSequence.
+
+        New protocol code should use :meth:`send_command`.  This narrow serial
+        interface lets the verified action module reuse this link without
+        exposing or owning the underlying ``serial.Serial`` instance.
+        """
+        return self._require_connection().write(data)
+
+    def flush(self) -> None:
+        """Flush pending output for the existing ArmSequence interface."""
+        self._require_connection().flush()
+
+    def readline(self) -> bytes:
+        """Read one response line for the existing ArmSequence interface."""
+        return self._require_connection().readline()
+
     def _wait_for(self, expected_prefix: str, timeout: float) -> str:
         """Wait for a response prefix and fail immediately on STM32 ERR."""
         serial_connection = self._require_connection()

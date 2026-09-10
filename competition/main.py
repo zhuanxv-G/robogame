@@ -13,6 +13,8 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(project_root))
 
 from competition.mission_controller import MissionController
+from competition.task_controller import TaskController
+from arm_sequence import ArmSequence
 from hardware.stm32_link import Stm32Link
 from vision.apriltag_service import AprilTagService
 from vision.k230_link import K230Link
@@ -22,6 +24,8 @@ def main() -> None:
     """Initialize the competition software skeleton without hardware I/O."""
     mission = MissionController()
     stm32 = Stm32Link()
+    arm = ArmSequence(stm32)
+    tasks = TaskController(arm)
     k230 = K230Link()
     apriltag = AprilTagService()
 
@@ -30,6 +34,7 @@ def main() -> None:
     print(f"STM32 connected: {stm32.is_connected}")
     print(f"K230 connected: {k230.is_connected}")
     print(f"AprilTag camera connected: {apriltag.is_connected}")
+    print(f"Task controller: {type(tasks).__name__}")
 
 
 if __name__ == "__main__":

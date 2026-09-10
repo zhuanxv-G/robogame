@@ -1,6 +1,6 @@
 # RoboGame 软件架构
 
-> 架构快照：2026-09-10。本文描述仓库当前实际状态，同时把尚未接入的规划模块明确标出。
+> 架构快照：2026-09-11。本文描述仓库当前实际状态，同时把尚未接入的规划模块明确标出。
 
 ## 1. 系统边界
 
@@ -42,6 +42,7 @@ Logitech C270 ──USB Video───┼──> Raspberry Pi 5
 | 比赛策略 | `strategy/mission.py` | START 到 BUILD 的任务顺序和元数据 | 只定义，未运行 |
 | 比赛状态 | `competition/mission_state.py` | START、FOLLOW_LINE、GET_ORANGE、GET_PURPLE、BUILD、FINISH、FAULT | 已定义 |
 | 比赛状态管理 | `competition/mission_controller.py` | 保存、显式切换、复位顶层状态 | 基础骨架完成；无动作逻辑 |
+| 比赛任务控制 | `competition/task_controller.py` | 把比赛任务接口适配到已有 ArmSequence 动作 | build/reset 已接入；独立取料待确认 |
 | 比赛入口 | `competition/main.py` | 初始化上述接口并打印状态 | 安全骨架完成；不连接硬件 |
 | 局部主控 | `main_controller_align.py` | K230D 对准、接近、停车、人工触发搭建 | 第一版联调完成 |
 | 机械动作 | `arm_sequence.py` | 已验证的三组搭建动作 | 已接入局部主控 |
@@ -55,12 +56,27 @@ Logitech C270 ──USB Video───┼──> Raspberry Pi 5
 python -m competition.main
   -> MissionController(START)
   -> Stm32Link(disconnected)
+  -> ArmSequence(Stm32Link)
+  -> TaskController(ArmSequence)
   -> K230Link(disconnected)
   -> AprilTagService(disconnected)
   -> 打印状态并退出
 ```
 
-该链路只验证软件对象可以组合，不调用 `connect()`，因此不会打开 STM32/K230D 串口或 USB Camera，也不会发送任何控制命令。
+该链路只验证软件对象可以组合，不调用 `connect()`、`build()` 或 `reset_arm()`，因此不会打开 STM32/K230D 串口或 USB Camera，也不会发送任何控制命令。
+
+TaskController 只负责任务级委托，不保存端口、创建串口或复制机械动作：
+
+```text
+TaskController.build()
+  -> ArmSequence.run_all()
+  -> group1() -> group2() -> group3()
+
+TaskController.reset_arm()
+  -> ArmSequence.safe_home()
+```
+
+`grab_orange()` 和 `grab_purple()` 当前返回 `NotImplemented`。仓库中的三个已验证 group 都包含抓取和放置，尚无颜色到独立抓取动作的可靠映射。`startup_raise()` 仍是独立入口的启动策略，不由 `build()` 隐式执行。
 
 ### 3.2 K230D 对准与机械臂搭建模式
 
@@ -129,7 +145,7 @@ MissionState.GET_ORANGE
   -> K230D orange detection + 抓取动作
 ```
 
-`MissionController` 现在可以保存、显式切换和复位新比赛状态，但没有自动转移、事件处理或动作调用。旧 `strategy/mission.py` 的任务元数据也尚未迁移到新状态层。
+`MissionController` 现在可以保存、显式切换和复位新比赛状态，但没有自动转移、事件处理或 TaskController 动作调用。旧 `strategy/mission.py` 的任务元数据也尚未迁移到新状态层。
 
 ## 5. 世界模型数据流
 
@@ -182,11 +198,14 @@ competition/main.py（未来唯一所有者；当前不连接）
 ├── AprilTag 输入组件
 ├── MissionController
 ├── NavigationController
-├── ArmSequence
-└── Stm32Link（唯一 STM32 serial.Serial）
+└── TaskController
+     └── ArmSequence
+          └── Stm32Link（唯一 STM32 serial.Serial 所有者）
 ```
 
-`Stm32Link` 的构造不会打开端口，只有显式 `connect()` 才创建 `serial.Serial`。它统一保留现有 LF 文本帧、两位小数 VEL、ACK/DONE 前缀等待、ERR 立即异常和超时异常语义。旧 `main_controller_align.py`、`arm_sequence.py` 与 `build_sequence.py` 尚未迁移，当前仍使用各自已经验证的串口对象和调用路径。
+`Stm32Link` 的构造不会打开端口，只有显式 `connect()` 才创建 `serial.Serial`。它统一保留现有 LF 文本帧、两位小数 VEL、ACK/DONE 前缀等待、ERR 立即异常和超时异常语义。为在不修改已验证 `arm_sequence.py` 的前提下完成依赖接入，Stm32Link 新增受连接状态保护的 `write()`、`flush()`、`readline()` 兼容转发；底层 `serial.Serial` 仍不向 TaskController 或 ArmSequence 暴露，也没有第二个所有者。
+
+旧 `main_controller_align.py` 和 `build_sequence.py` 尚未迁移，当前仍使用各自已经验证的串口对象和调用路径；`arm_sequence.py` 本身保持完全不变，并已可由新 competition 骨架通过 Stm32Link 复用。
 
 ## 7. 安全和故障流
 
@@ -209,6 +228,7 @@ competition/main.py（未来唯一所有者；当前不连接）
 - 独立测试多为 import 即执行，不能作为自动化测试集合运行。
 - 没有上限位器，startup raise 不能视为 Homing。
 - 新比赛入口还没有异常到 `MissionState.FAULT` 的映射，也没有退出时的统一 STOP/关闭策略；在真正连接硬件前必须补齐。
+- MissionController 尚未定义何时调用 build/reset；独立橙色和紫色取料动作也没有实机确认，不能把任意 group 直接映射为颜色任务。
 
 ## 8. 配置和依赖
 
@@ -263,6 +283,7 @@ tests/servo_test.py          通用命令透传，可能驱动任意执行器
 世界与状态层
 ├── field_model：区域、Tag、线路
 ├── MissionController：任务阶段
+├── TaskController：已验证机械臂任务适配
 └── NavigationController：当前行为
         │
         v
@@ -274,6 +295,6 @@ tests/servo_test.py          通用命令透传，可能驱动任意执行器
 STM32 唯一串口链路
 ```
 
-仍未完成的部分包括：把旧调用方迁移为共享一个 `Stm32Link`、为 MissionController 定义事件与合法转移、接入 STM32 巡线事件、连接 K230D/AprilTag 结果与橙色/紫色任务、实现 BUILD/FINISH/FAULT 的安全收尾，以及无硬件 mock 测试和后续实机回归。
+仍未完成的部分包括：把旧调用方迁移为共享一个 `Stm32Link`、为 MissionController 定义事件与合法转移、接入 STM32 巡线事件、实机确认独立橙色/紫色取料动作、连接 K230D/AprilTag 结果与任务调用、实现 BUILD/FINISH/FAULT 的安全收尾，以及系统化无硬件测试和后续实机回归。
 
 实现顺序应继续优先保证协议和串口所有权，其次接入状态转换，最后再标定世界坐标和视觉阈值。不要在全自动状态机未可观测、未可安全停车前一次性叠加全部动作。

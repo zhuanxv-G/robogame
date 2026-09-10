@@ -1,6 +1,6 @@
 # RoboGame 当前状态
 
-> 状态快照：2026-09-10
+> 状态快照：2026-09-11
 > 分析基准：本地 `main` 分支及当前工作区。
 > 本文区分“代码可确认”“项目记录为已实机验证”和“尚待确认”，避免把历史脚本或规划接口误认为现役功能。
 
@@ -29,6 +29,7 @@ robogame/
 ├── competition/
 │   ├── mission_state.py           # 比赛顶层状态定义
 │   ├── mission_controller.py      # 仅管理状态的基础控制器
+│   ├── task_controller.py         # 复用已验证机械臂动作的任务接口
 │   └── main.py                    # 不连接硬件的未来比赛入口骨架
 ├── navigation/
 │   ├── localization.py            # AprilTag 轻量定位结果
@@ -73,6 +74,7 @@ robogame/
 - 根据 `error_x`、目标面积等信息进行轻量对准和接近判断。
 - 保存比赛场地区域、Tag 和巡线拓扑世界模型。
 - 保存比赛任务顺序及未来状态机接口。
+- 通过 `TaskController` 调度已有机械臂搭建和安全复位动作。
 - 通过唯一 STM32 串口连接发送底盘、Servo、Stepper 和 STOP 命令。
 
 新增分层已把 STM32、K230D 和 AprilTag 的“构造”与“连接”分开。创建这些对象不会打开串口或摄像头；硬件连接必须由未来调度入口显式执行。
@@ -112,18 +114,26 @@ robogame/
 | AprilTagLocalization | 基础接口完成 | 每帧选择面积最大 Tag，输出语义名称和面积启发式 confidence |
 | 比赛世界模型 | 结构已建立，坐标未标定 | 官方尺寸和拓扑已结构化；绝对区域、Tag、路口坐标仍为 TODO |
 | 导航/任务状态定义 | 基础接口完成 | `competition.MissionState` 新增 FINISH、FAULT；`MissionController` 只负责显式切换和复位，没有运行时调度策略 |
-| 比赛入口 | 安全骨架完成 | `python -m competition.main` 只初始化对象并打印 START/未连接状态，不连接任何硬件 |
+| 机械臂任务控制 | 骨架完成，未实机回归 | `TaskController.build()` 复用 `ArmSequence.run_all()`，`reset_arm()` 复用 `safe_home()`；两种独立取料动作尚未确认 |
+| 比赛入口 | 安全骨架完成 | `python -m competition.main` 初始化状态、视觉、STM32、ArmSequence 和 TaskController，只打印状态，不连接任何硬件 |
 | 完整比赛闭环 | 未完成 | 尚无统一入口串起巡线、Tag 定位、两类取料和搭建 |
 
 ## 6. 当前代码入口
 
 ### 6.1 未来比赛入口骨架：`competition/main.py`
 
-该入口当前只创建 `MissionController`、`Stm32Link`、`K230Link` 和 `AprilTagService`，并打印任务状态和三项连接状态。它不会调用任何 `connect()`，不会打开串口或摄像头，也不会发送运动命令。安全检查方式为：
+该入口当前创建 `MissionController`、`Stm32Link`、`ArmSequence`、`TaskController`、`K230Link` 和 `AprilTagService`，并打印任务状态、任务控制器类型和三项连接状态。`ArmSequence` 接收同一个 `Stm32Link`，没有第二个 STM32 串口所有者。入口不会调用任何 `connect()` 或 TaskController 动作，不会打开串口或摄像头，也不会发送运动命令。安全检查方式为：
 
 ```bash
 python -m competition.main
 ```
+
+当前 TaskController 的真实能力边界：
+
+- `build()` 只委托 `ArmSequence.run_all()`，保持 `group1 -> group2 -> group3` 的已验证动作顺序。
+- `reset_arm()` 只委托已有 `safe_home()`。
+- `grab_orange()` 和 `grab_purple()` 返回 `NotImplemented`。现有三个 group 都把抓取和放置组合在一起，仓库没有把任何一组定义为某种颜色的独立取料动作，因此不能安全猜测映射。
+- `build()` 不隐式调用固定 `startup_raise()`；该动作在现有代码中属于独立入口启动策略，且不是带限位的 Homing。
 
 ### 6.2 整车联调入口：`main_controller_align.py`
 
@@ -176,7 +186,7 @@ python tests/test_localization.py
 - Servo、Stepper 与完整三组机械臂搭建动作。
 - K230D 视觉对准、前进、停车确认和人工触发搭建的第一版联调。
 
-本次仅做静态分析，没有连接树莓派或运行任何会运动硬件的脚本，因此没有重新执行上述实机测试。
+本次只做语法、import、安全入口和无硬件 mock 检查，没有连接串口、摄像头或运行任何会运动硬件的脚本，因此没有重新执行上述实机测试。
 
 ### 7.2 测试代码性质
 
@@ -186,19 +196,18 @@ AprilTag 两个脚本同样是相机人工测试，不包含断言。当前仓�
 
 ## 8. 当前未完成任务和已知缺口
 
-1. `MissionController` 目前只保存状态；尚无事件、合法转移策略或驱动 `FOLLOW_LINE -> GET_ORANGE -> GET_PURPLE -> BUILD -> FINISH` 的调度循环。
-2. `competition/main.py` 尚未连接 K230D、AprilTag、STM32 或现有执行模块；当前可运动的联调入口仍是 `main_controller_align.py`。
+1. `MissionController` 目前只保存状态；尚未调用 TaskController，也没有事件、合法转移策略或驱动 `FOLLOW_LINE -> GET_ORANGE -> GET_PURPLE -> BUILD -> FINISH` 的调度循环。
+2. `competition/main.py` 已建立 TaskController、ArmSequence 和 Stm32Link 的对象依赖，但尚未连接 K230D、AprilTag、STM32 或执行任何动作；当前可运动的联调入口仍是 `main_controller_align.py`。
 3. STM32 巡线与 Pi 任务状态之间缺少明确的开始、到站、路口和完成事件接口。
 4. 世界模型缺少六个 Tag 中心 `(x, y, yaw)`、黑线节点/线段长度和关键停车点实测值。
 5. AprilTag 目前只有像素误差和像素面积，没有相机内参、畸变校正、姿态估计或跨帧稳定策略。
-6. K230D 的橙色、紫色检测结果如何映射到抓取任务，当前正式入口中还没有完整任务级接口。
+6. K230D 的橙色、紫色检测结果如何触发取料尚未定义；TaskController 已有接口，但现有 ArmSequence 没有经过确认的独立橙色/紫色抓取动作。
 7. 新增链路层已引用 `config.py`；旧主控和部分诊断脚本仍复制路径或使用 `/dev/ttyUSB*` 等易漂移路径。
 8. 没有 `requirements.txt` 或其他依赖锁定文件。已知 Pi 环境包含 `pyserial`、`numpy`、`opencv-python-headless` 和 `pupil_apriltags`，但版本没有记录。
 9. `main_controller_align.py` 在模块顶层打开串口，且主 `try/finally` 在串口打开和启动等待之后才开始；它不适合被其他模块 import。
 10. 当前主控启动时没有执行 `HELLO_STM32,1` 版本握手；独立机械臂入口会执行。
 11. 缺少 STM32 源码、固件构建配置和当前烧录版本，无法从仓库复核接收端参数范围与错误码全集。
-12. Git 本地 `main` 在分析开始时比 `origin/main` 超前 1 个提交；`7f9fdec` 的场地世界模型尚未反映到远端引用。
-13. `strategy/mission.py` 的旧任务元数据尚未迁移到新的 `competition.MissionState`，两层接口暂时并存。
+12. `strategy/mission.py` 的旧任务元数据尚未迁移到新的 `competition.MissionState`，两层接口暂时并存。
 
 ## 9. 现有文档评估
 
@@ -220,10 +229,10 @@ AprilTag 两个脚本同样是相机人工测试，不包含断言。当前仓�
 建议按以下顺序推进，每一步先做无运动模拟，再做单项实机验证：
 
 1. 找回或关联 STM32 工程和固件版本，补齐接收端协议、参数边界、错误码和巡线事件定义。
-2. 在已建立的 `competition/main.py` 和 `Stm32Link` 骨架上接入唯一 STM32 串口所有权，并逐步迁移现有调用方；接入前继续保持默认不连接硬件。
-3. 为 `MissionController` 增加经过无硬件测试的事件与合法转移策略，再接入巡线到站、搜索 Tag、Tag 对准、视觉取料、搭建完成。
+2. 在已建立的 `competition/main.py -> TaskController -> ArmSequence -> Stm32Link` 依赖上设计显式连接、握手、STOP 确认和异常关闭生命周期；实机接入前继续保持默认不连接硬件。
+3. 为 `MissionController` 增加经过无硬件测试的事件与合法转移策略，再接入巡线到站、搜索 Tag、Tag 对准、经过实机确认的两类取料动作和搭建完成。
 4. 现场测量 Tag、T 字路口和停车点，填写 `field_model.py` 中的 TODO；固定相机后再标定面积和误差阈值。
 5. 给 K230D 解析、AprilTag 目标选择、任务转移和协议格式增加不连接硬件的单元测试及串口 mock。
 6. 统一配置与依赖记录，但迁移时保持已验证设备路径、速度、Servo 角度、Stepper 步数和延时原值不变。
 
-当前最准确的完成度描述是：底层执行和各视觉/机械能力已具备，局部联调已完成；比赛分层、无副作用入口和基础任务状态管理骨架已建立；比赛级全自动编排、现有执行模块迁移、现场坐标标定、实机集成回归和系统化自动测试仍未完成。
+当前最准确的完成度描述是：底层执行和各视觉/机械能力已具备，局部联调已完成；比赛分层、无副作用入口、基础任务状态管理和机械臂任务适配骨架已建立；独立橙色/紫色取料、比赛级全自动编排、硬件生命周期、现场坐标标定、实机集成回归和系统化自动测试仍未完成。
