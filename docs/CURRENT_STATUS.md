@@ -123,7 +123,7 @@ robogame/
 | 导航/任务状态定义 | 基础接口完成 | `competition.MissionState` 新增 FINISH、FAULT；`MissionController` 只负责显式切换和复位，没有运行时调度策略 |
 | competition 导航控制 | Pi 端抽象完成，未实机回归 | `NavigationController` 可发送已有 `LINE_START`、通过 Stm32Link STOP、记录材料区，并通过 AprilTagService 查询指定 Tag；没有巡线完成事件或自动路线 |
 | competition 流程调度 | 第一版模拟流程完成 | `CompetitionRunner` 通过外部事件串联巡线、橙色目标接近、抓取、搭建和结束；默认 simulation mode 不调用硬件控制器 |
-| 机械臂任务控制 | 骨架完成，未实机回归 | `TaskController.build()` 复用 `ArmSequence.run_all()`，`reset_arm()` 复用 `safe_home()`；两种独立取料动作尚未确认 |
+| 机械臂任务控制 | 骨架完成，橙色抓取待确认 | `TaskController.build()` 复用 `ArmSequence.run_all()`，`reset_arm()` 复用 `safe_home()`；静态考古发现一个禁用的旧抓取候选，但不足以确认其颜色、存放目标和当前实机有效性 |
 | 比赛入口 | 安全模拟入口完成 | `python -m competition.main` 初始化 CompetitionRunner，默认只打印 simulation/START 及子控制器状态，不连接或运行任何硬件 |
 | 完整比赛闭环 | 未完成 | Runner 已串起第一版橙色任务模拟流程，但没有真实事件、可执行橙色抓取、紫色任务或 live 生命周期 |
 
@@ -143,6 +143,48 @@ python -m competition.main
 - `reset_arm()` 只委托已有 `safe_home()`。
 - `grab_orange()` 和 `grab_purple()` 返回 `NotImplemented`。现有三个 group 都把抓取和放置组合在一起，仓库没有把任何一组定义为某种颜色的独立取料动作，因此不能安全猜测映射。
 - `build()` 不隐式调用固定 `startup_raise()`；该动作在现有代码中属于独立入口启动策略，且不是带限位的 Homing。
+
+#### 6.1.1 橙色抓取动作考古结论（2026-09-11）
+
+在 Pi 仓库历史、`legacy/`、`tests/`、`arm_sequence.py`、`build_sequence.py` 和 `main_controller_align.py` 中，没有找到被明确命名为“橙色方块抓取并放入中间盒”的独立动作。外部 STM32 工程 `D:\Code\V1.3_vision\V1.3\Core\Src\main.c` 的 `Test_All()` 中存在一段最接近该语义的旧候选，原样位于 `#if 0`：
+
+```text
+delay 500 ms
+Servo1=0, Servo2=0, Servo4=135
+delay 500 ms
+Robot.Move_Distance(0.5f, 2.0f)
+Robot.Move_Distance(-0.05f, 1.0f)
+delay 500 ms
+Stepper +3000 @ 800 pps
+delay 500 ms
+Servo4=105
+delay 500 ms
+Servo2=15
+delay 500 ms
+Stepper -3000 @ 800 pps
+delay 500 ms
+Robot.Move_Distance(-0.30f, 1.5f)
+delay 500 ms
+Servo2=0
+Servo1 Sweep_To(93, 10 ms/degree)
+delay 500 ms
+Stepper +5000 @ 800 pps
+delay 500 ms
+Servo4=135
+delay 500 ms
+Stepper -5000 @ 800 pps
+delay 500 ms
+```
+
+该候选不能直接封装为 `grab_orange()`，原因如下：
+
+- 源码没有“橙色”或“中间盒”注释，也没有当前调用入口；正式 `main()` 注释掉了 `Test_All()`，工程文档把其内容定义为旧测试代码。
+- 候选同时包含三段底盘 `Robot.Move_Distance()`，并非可不改变顺序地抽取为纯 `ArmSequence` 动作。
+- 候选与当前 `ArmSequence.group1()` 不一致：后者使用 Servo4 140/105/135、Servo2 120/180/0、Servo1 Sweep 170 后设置 178/30，以及 Stepper ±3000、±10500；旧候选使用 Servo2 15、Servo1 Sweep 93 和 Stepper ±5000。不能把两者视为同一动作版本。
+- STM32 工程目录没有可用的 Git 历史，Pi Git 历史也只有从原 `build_sequence.py` 抽取三组搭建动作的版本，无法用版本关系证明旧候选曾在当前机械结构上完成橙色取料。
+- Stepper 只有相对步数，没有原点、限位或编码器。旧候选本身不执行 `startup_raise()`；`build_sequence.py` 固定先执行 -1500 steps @ 800 pps，而 `main_controller_align.py` 默认关闭该动作，两个入口的起始高度并不等价。
+
+因此 `TaskController.grab_orange()` 继续返回 `NotImplemented`，CompetitionRunner 也继续在非模拟 `GRAB_ORANGE` 阶段阻塞。继续实现前至少需要：实机记录或操作者确认旧候选的任务语义；确认其中三段底盘动作是否属于不可分割的已验证顺序；确认动作开始时的 Servo 姿态和 Stepper 机械高度；确认 -1500 @ 800 pps 是否应在该流程前且仅执行一次；以及确认当前实机/固件仍对应这套参数。
 
 当前 VisualApproachController 的真实能力边界：
 
@@ -222,7 +264,7 @@ python tests/test_localization.py
 - Servo、Stepper 与完整三组机械臂搭建动作。
 - K230D 视觉对准、前进、停车确认和人工触发搭建的第一版联调。
 
-本次只做语法、import、安全入口和 Fake Controller 检查，包括默认模拟零调用、完整事件顺序、真实委托分支、未实现抓取阻塞、乱序事件和 FAULT；没有连接串口、摄像头或运行任何会运动硬件的脚本，因此没有重新执行上述实机测试。
+本次橙色抓取考古只做源码、Git 历史、构建清单和文档的静态检查，并复查 Python 语法、import 无副作用及当前 `grab_orange() == NotImplemented` 的安全阻塞行为；没有连接串口、摄像头或运行任何会运动硬件的脚本，因此没有重新执行上述实机测试。
 
 ### 7.2 测试代码性质
 
@@ -237,12 +279,12 @@ AprilTag 两个脚本同样是相机人工测试，不包含断言。当前仓�
 3. Pi 端目前只能发送已有 `LINE_START` 和 STOP；STM32 巡线与比赛任务之间仍缺少经过验证的到站、路口、完成和错误事件，`ARRIVED` 不会自动进入。
 4. 世界模型缺少六个 Tag 中心 `(x, y, yaw)`、黑线节点/线段长度和关键停车点实测值。
 5. AprilTag 目前只有像素误差和像素面积，没有相机内参、畸变校正、姿态估计或跨帧稳定策略。
-6. K230D 的橙色、紫色检测结果如何触发取料尚未定义；TaskController 已有接口，但现有 ArmSequence 没有经过确认的独立橙色/紫色抓取动作。
+6. K230D 的橙色、紫色检测结果如何触发取料尚未定义；TaskController 已有接口，但现有 ArmSequence 没有经过确认的独立橙色/紫色抓取动作。STM32 `Test_All()` 中虽有一个禁用的“±3000/±5000 + 底盘移动”旧候选，但缺少颜色/存放语义、调用证据、起始高度和实机版本确认，不能直接采用。
 7. 新增链路层已引用 `config.py`；旧主控和部分诊断脚本仍复制路径或使用 `/dev/ttyUSB*` 等易漂移路径。
 8. 没有 `requirements.txt` 或其他依赖锁定文件。已知 Pi 环境包含 `pyserial`、`numpy`、`opencv-python-headless` 和 `pupil_apriltags`，但版本没有记录。
 9. `main_controller_align.py` 在模块顶层打开串口，且主 `try/finally` 在串口打开和启动等待之后才开始；它不适合被其他模块 import。
 10. 当前主控启动时没有执行 `HELLO_STM32,1` 版本握手；独立机械臂入口会执行。
-11. 缺少 STM32 源码、固件构建配置和当前烧录版本，无法从仓库复核接收端参数范围与错误码全集。
+11. Pi 仓库不包含 STM32 源码；已只读检查外部工程 `D:\Code\V1.3_vision\V1.3`，但该目录没有可用 Git 历史，也没有与当前烧录固件/实机测试记录的版本对应关系。
 12. `strategy/mission.py` 的旧任务元数据尚未迁移到新的 `competition.MissionState`，两层接口暂时并存。
 
 ## 9. 现有文档评估
@@ -264,7 +306,7 @@ AprilTag 两个脚本同样是相机人工测试，不包含断言。当前仓�
 
 建议按以下顺序推进，每一步先做无运动模拟，再做单项实机验证：
 
-1. 找回或关联 STM32 工程和固件版本，补齐接收端协议、参数边界、错误码和巡线事件定义。
+1. 为外部 STM32 工程、当前烧录固件和实机测试记录建立可追溯版本关系，补齐接收端协议、参数边界、错误码和巡线事件定义。
 2. 为 CompetitionRunner 设计独立、显式的 live 启动入口，补齐连接、握手、循环、STOP 确认和异常关闭生命周期；在完成安全审查前保持 `competition/main.py` 默认 simulation mode。
 3. STM32 端事件经实机确认后，再由协议适配层把它们映射为 Runner 事件；不要直接把尚未验证的字符串加入 Stm32Link 或 NavigationController。
 4. 现场测量 Tag、T 字路口和停车点，填写 `field_model.py` 中的 TODO；固定相机后再标定面积和误差阈值。
