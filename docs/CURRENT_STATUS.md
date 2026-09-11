@@ -63,10 +63,10 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 | 麦克纳姆轮底盘 | 全向移动 | 由 STM32 执行 `VEL` 等运动命令 | 项目记录为已验证 |
 | Servo 机械臂 | 抓取、搬运、搭建 | 代码使用 Servo 索引 0-4 | 动作序列记录为已实机验证 |
 | TB6600 + Stepper | 机械臂升降/直线运动 | STM32 接收步数与 pps | 动作序列记录为已实机验证 |
-| 幻尔四路巡线传感器 | 黑线检测 | STM32 软件 I2C：PC4=SCL、PC5=SDA，低 4 位 1=黑线 | 外部 STM32 源码可确认；接线/I2C 实机状态待查 |
+| 幻尔四路巡线传感器 | 黑线检测 | STM32 软件 I2C：PC4=SCL、PC5=SDA，低 4 位 1=黑线 | 当前固件直线巡线已现场工作；全白输入会继续前进的风险待处理 |
 | 底盘电机及驱动 | 底盘执行 | 由 STM32 侧控制 | 电机和驱动器具体型号不在本仓库 |
 
-当前资料还缺少完整 BOM、供电树、接线图以及可追溯的 STM32 固件版本标识；巡线传感器型号和源码引脚定义已确认，但尚未通过本次修改后的固件完成现场回归。
+当前资料还缺少完整 BOM、供电树、接线图以及可追溯的 STM32 固件版本标识；巡线传感器型号、源码引脚和直线巡线能力已确认，T 字路口行为尚未验证和处理。
 
 ## 4. 软件架构
 
@@ -93,7 +93,7 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 - 执行 Stepper 指定步数运动并报告完成。
 - 提供命令 ACK、完成通知和错误回复。
 
-上述职责已由 Pi 端调用以及外部 STM32 源码交叉确认。STM32 源码仍不属于本 Git 仓库；当前已复核 USART1 命令解析、控制权切换、巡线软件 I2C、LineNav 周期更新和停车路径，但不能据此宣称新固件已经烧录或通过实车验证。
+上述职责已由 Pi 端调用以及外部 STM32 源码交叉确认。STM32 源码仍不属于本 Git 仓库；当前直线巡线已有现场结果，但由于外部工程缺少可用 Git 历史和固件标识，仍不能把现场固件精确关联到某次本地构建。
 
 ### 4.3 通信方式
 
@@ -110,18 +110,18 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 | Pi 车载环境与设备接入 | 已完成基础部署 | Python 3.13、虚拟环境和 USB 设备已建立；仓库没有依赖锁定文件 |
 | Pi ↔ STM32 串口通信 | 已验证 | 正式 by-id 路径和 115200 波特率已固定；请求/响应代码正在使用 |
 | STM32 通信抽象层 | 骨架完成，未实机回归 | `Stm32Link` 封装 HELLO_STM32、STOP、VEL、SERVO_GET、SERVO_SET、STEPPER_MOVE，并要求显式 `connect()` |
-| STM32 底盘、电机、巡线 | 底盘可运动；巡线故障待现场复测 | 现场 `FORWARD` 正常；旧固件 `LINE_START` 仅 ACK 后不动。当前外部源码已加入只读 `LINE_STATUS`、启动传感器预检和 `ERR,LINE_SENSOR_IO`，Keil 编译通过但尚未烧录/实车验证 |
+| STM32 底盘、电机、巡线 | 直线巡线基本可用 | 当前 `LINE_START` 已能以 0.40 m/s 进入直线巡线，轻微蛇形暂可接受；全白仍继续前进，T 字路口留待后续处理 |
 | Servo、Stepper、机械臂 | 动作层已验证 | `ArmSequence` 可复用，三组搭建动作和安全 HOME 已保留；不要改动参数 |
 | K230D 物块视觉 | 单项检测已验证 | 当前主控能解析目标并完成对准/接近；完整橙色、紫色任务切换尚未接入 |
 | K230D 接口层 | 骨架完成，未实机回归 | `K230Link` 封装连接生命周期、现有 `TARGET` / `NO_TARGET` 解析格式和最新消息读取 |
 | K230D 对准到搭建 | 第一版已接通 | `main_controller_align.py` 可从 ALIGN/APPROACH 到 READY，再经人工 `b` 确认执行 ARM_BUILD |
 | competition 视觉接近 | 软件迁移完成，未实机回归 | `VisualApproachController` 保留原阈值、EMA、速度、三帧 READY 和超时 STOP；尚未由 MissionController 自动运行 |
-| AprilTag 检测 | 基础模块完成 | 输出 id、中心、误差、像素面积和角点；无 GUI，适合 SSH |
-| AprilTag 服务层 | 骨架完成，未实机回归 | `AprilTagService` 延迟创建原 `AprilTagDetector`，没有修改检测算法和参数 |
+| AprilTag 检测 | 单项现场验证完成 | 场地可稳定输出正确 id、error_x 和像素面积，最远约 2.7 m 可检测；无 GUI，适合 SSH |
+| AprilTag 服务层 | 接口完成 | `AprilTagService` 延迟创建原 `AprilTagDetector`，没有修改已现场验证的检测算法和参数 |
 | AprilTagLocalization | 基础接口完成 | 每帧选择面积最大 Tag，输出语义名称和面积启发式 confidence |
 | 比赛世界模型 | 结构已建立，坐标未标定 | 官方尺寸和拓扑已结构化；绝对区域、Tag、路口坐标仍为 TODO |
 | 导航/任务状态定义 | 基础接口完成 | `competition.MissionState` 新增 FINISH、FAULT；`MissionController` 只负责显式切换和复位，没有运行时调度策略 |
-| competition 导航控制 | Pi 端抽象完成，未实机回归 | `NavigationController` 可发送已有 `LINE_START`、通过 Stm32Link STOP、记录材料区，并通过 AprilTagService 查询指定 Tag；没有巡线完成事件或自动路线 |
+| competition 导航控制 | Tag 辅助到站软件实现完成，待实机联调 | `start_line_to_tag()` 启动 STM32 巡线，`update()` 按目标 Tag 面积连续帧确认并在 STOP ACK 后进入 ARRIVED；阈值由入口传入，尚待现场标定 |
 | competition 流程调度 | 第一版模拟流程完成 | `CompetitionRunner` 通过外部事件串联巡线、橙色目标接近、抓取、搭建和结束；默认 simulation mode 不调用硬件控制器 |
 | 机械臂任务控制 | 骨架完成，橙色抓取待确认 | `TaskController.build()` 复用 `ArmSequence.run_all()`，`reset_arm()` 复用 `safe_home()`；静态考古发现一个禁用的旧抓取候选，但不足以确认其颜色、存放目标和当前实机有效性 |
 | 比赛入口 | 安全模拟入口完成 | `python -m competition.main` 初始化 CompetitionRunner，默认只打印 simulation/START 及子控制器状态，不连接或运行任何硬件 |
@@ -199,6 +199,10 @@ delay 500 ms
 
 - 使用独立于 MissionState 的 `IDLE`、`LINE_FOLLOWING`、`TAG_SEARCH`、`TAG_ALIGN`、`ARRIVED`、`FAULT` 状态。
 - `start_line_follow()` 只通过共享 Stm32Link 发送仓库已有的 `LINE_START`；不等待或推断巡线完成。
+- `start_line_to_tag(tag_id, arrival_area, confirm_frames)` 使用同一个 `LINE_START` 启动 STM32 本地巡线；后续每次 `update()` 只读取一帧 AprilTag 结果。
+- 目标未出现、出现错误 Tag、面积低于阈值或中间丢帧时继续巡线，并清零连续确认计数；不会因偶发漏检停车。
+- 只有指定 Tag 的面积连续 `confirm_frames` 帧达到调用方传入的 `arrival_area`，才要求 STM32 确认 STOP，并在成功后进入 `ARRIVED`。该阈值没有内置最终值，仍需现场标定。
+- 状态快照包含目标 id、是否可见、当前 `error_x`、`area`、确认计数和错误。AprilTag 读取异常或 STM32 异常会尝试安全 STOP 并进入 `FAULT`；STOP 本身失败则保持 `FAULT` 可观测。
 - `stop_navigation()` 只通过 Stm32Link 发送现有 STOP。
 - `navigate_to_material_zone()` 只接受 `ORANGE` / `PURPLE` 并记录目标，不生成路线或底盘命令。
 - `align_with_tag()` 只调用 AprilTagService 读取一帧并记录指定 Tag 是否可见；`TAG_ALIGN` 目前不代表已经执行姿态修正。
@@ -246,9 +250,17 @@ python tests/test_localization.py
 
 二者会持续打开相机，按 Ctrl+C 释放；不会打开 STM32，也不会驱动机器人。
 
+第一版 AprilTag 辅助巡线到站人工入口为：
+
+```bash
+python3 tests/test_line_to_tag.py --tag-id 2 --arrival-area 10000 --confirm-frames 3
+```
+
+`arrival_area=10000` 仅为显式测试示例，不是最终参数。脚本先打印全部参数并要求人工输入 `START`，确认后才连接设备和发送 `LINE_START`；Ctrl+C、异常和非 ARRIVED 退出路径都会尝试 STOP，再释放相机和 STM32。
+
 ### 6.5 STM32 入口
 
-STM32 不在本 Git 仓库中。当前外部源码入口为 `D:\Code\V1.3_vision\V1.3\Core\Src\main.c`，Keil 工程为 `D:\Code\V1.3_vision\V1.3\MDK-ARM\f407_ustc_2022_robogame.uvprojx`。2026-09-11 对巡线诊断修改做过 ARMCC V5 全量重编译，结果为 0 error、1 个原有 `Test_All` 未引用警告；仍需人工烧录和现场验证。
+STM32 不在本 Git 仓库中。当前外部源码入口为 `D:\Code\V1.3_vision\V1.3\Core\Src\main.c`，Keil 工程为 `D:\Code\V1.3_vision\V1.3\MDK-ARM\f407_ustc_2022_robogame.uvprojx`。历史记录显示 2026-09-11 的巡线诊断版本经 ARMCC V5 全量重编译为 0 error、1 个原有 `Test_All` 未引用警告；当前现场已确认直线巡线工作，但固件与本地构建的精确版本关联仍缺失。本轮未修改或编译 STM32 工程。
 
 ## 7. 当前测试状态
 
@@ -264,21 +276,23 @@ STM32 不在本 Git 仓库中。当前外部源码入口为 `D:\Code\V1.3_vision
 - Servo、Stepper 与完整三组机械臂搭建动作。
 - K230D 视觉对准、前进、停车确认和人工触发搭建的第一版联调。
 
-2026-09-11 的巡线排查确认：Pi→STM32 命令、底盘和基础运动正常；旧固件表现为 `LINE_START` 返回 ACK 但车辆不动。源码静态分析表明 ACK 当时只证明 LineNav 已置 Active，随后第一次软件 I2C 读取失败会立即撤销 Active 并紧急停车。诊断补丁只做过静态检查、Keil 编译和 Pi Python 语法检查，没有连接串口、烧录或运行任何会运动硬件的脚本，因此根因仍需用 `LINE_STATUS` 现场闭环确认。
+2026-09-11 后续现场结果确认：当前固件的 `LINE_START` 已能完成直线巡线，轻微蛇形暂可接受，本轮不调整控制参数。已知安全缺口是四路全白时仍继续前进；T 字路口也留待后续单独处理。
+
+同场 AprilTag 单项测试可稳定输出正确 id 和 `error_x`，最远约 2.7 m 可检测。固定现场条件下记录的面积样本为：30 cm≈82767.9、60 cm≈16454.4、90 cm≈9839.2、120 cm≈5120.1、170 cm≈2594.9、200 cm≈1580.6、240 cm≈1307.5、270 cm≈1118.0。像素面积受 Tag、相机固定方式和视角影响，这些样本不能替代本次到站链路的 `arrival_area` 实车标定。
 
 ### 7.2 测试代码性质
 
-`tests/` 不是 pytest 自动化测试套件，而是一组人工硬件诊断脚本。多数脚本在导入或启动时立即打开串口，其中 `motor_cmd_test.py` 会直接让底盘运动；不能批量运行、不能由 pytest 自动收集，也不能在主控制器占用同一串口时运行。
+`tests/` 主要是一组人工硬件诊断脚本。多数旧脚本在导入或启动时立即打开串口，其中 `motor_cmd_test.py` 会直接让底盘运动；不能批量运行，也不能在主控制器占用同一串口时运行。
 
-AprilTag 两个脚本同样是相机人工测试，不包含断言。当前仓库没有模拟串口、纯逻辑单元测试、持续集成配置或统一回归清单。
+AprilTag 两个旧脚本同样是相机人工测试，不包含断言。新增 `test_line_to_tag.py` 是带人工启动确认的实机入口，不能由自动测试调用；`test_navigation_controller_unit.py` 使用 Fake 服务覆盖到站状态逻辑且不连接硬件。仓库仍没有持续集成配置或统一回归清单。
 
 ## 8. 当前未完成任务和已知缺口
 
 1. `CompetitionRunner` 已定义第一版事件顺序，但 `LINE_DONE`、`TARGET_READY`、`ARM_DONE`、`BUILD_DONE` 目前均没有真实生产者，只能由测试或未来适配层注入。
 2. `competition/main.py` 固定使用 simulation mode，尚未实现显式连接、握手、运行循环、统一退出 STOP 和资源关闭；当前可运动的联调入口仍是 `main_controller_align.py`。
-3. 当前 STM32 源码已有 `LINE_START`、`LINE_STOP`、只读 `LINE_STATUS` 和 `ERR,LINE_SENSOR_IO`；这些新增协议尚未烧录/实测。巡线仍没有 LINE_DONE、到站或路口事件，`ARRIVED` 不会自动进入。
+3. 当前 STM32 直线巡线已现场可用，但仍没有 LINE_DONE 或路口事件；Pi 新增的 `ARRIVED` 仅由指定 AprilTag 面积连续达标并成功 STOP 产生，尚未接入 CompetitionRunner。
 4. 世界模型缺少六个 Tag 中心 `(x, y, yaw)`、黑线节点/线段长度和关键停车点实测值。
-5. AprilTag 目前只有像素误差和像素面积，没有相机内参、畸变校正、姿态估计或跨帧稳定策略。
+5. AprilTag 目前只有像素误差和像素面积，没有相机内参、畸变校正或姿态估计；到站控制器只增加连续帧确认，`arrival_area` 仍需按实际停车距离标定。
 6. K230D 的橙色、紫色检测结果如何触发取料尚未定义；TaskController 已有接口，但现有 ArmSequence 没有经过确认的独立橙色/紫色抓取动作。STM32 `Test_All()` 中虽有一个禁用的“±3000/±5000 + 底盘移动”旧候选，但缺少颜色/存放语义、调用证据、起始高度和实机版本确认，不能直接采用。
 7. 新增链路层已引用 `config.py`；旧主控和部分诊断脚本仍复制路径或使用 `/dev/ttyUSB*` 等易漂移路径。
 8. 没有 `requirements.txt` 或其他依赖锁定文件。已知 Pi 环境包含 `pyserial`、`numpy`、`opencv-python-headless` 和 `pupil_apriltags`，但版本没有记录。
@@ -297,7 +311,7 @@ AprilTag 两个脚本同样是相机人工测试，不包含断言。当前仓�
 | `docs/FIELD_DESCRIPTION.md` | 当前场地事实主文档 | 官方尺寸与 TODO 分界清晰；绝对坐标仍需现场测量 |
 | `tests/README.md` | 可作为硬件测试安全说明 | 尚未列出两个 AprilTag 测试脚本 |
 | `legacy/README.md` | 可继续使用 | 清楚标出旧脚本和旧协议，不应作为现役入口 |
-| `docs/PI_STM32_PROTOCOL.md` | 本次新增 | 已与外部 STM32 当前源码交叉验证；新增巡线诊断仍待烧录和实机确认 |
+| `docs/PI_STM32_PROTOCOL.md` | 可继续使用 | 已与外部 STM32 源码交叉验证；现场固件与本地构建的精确版本关联仍缺失 |
 | `docs/SOFTWARE_ARCHITECTURE.md` | 本次新增 | 描述当前实际链路和目标整合边界 |
 
 Pi 工作区和 Git 历史中没有 `docs/STM32_PROJECT_MAP.md` 和 `docs/STM32_SAFETY_PATCHES.md`；同名资料存在于外部 STM32 工程，但未纳入 Pi 仓库版本管理。需要跨仓库引用时应记录外部工程版本或构建标识，不能把外部未跟踪文件视为 Pi 仓库内容。
@@ -306,11 +320,12 @@ Pi 工作区和 Git 历史中没有 `docs/STM32_PROJECT_MAP.md` 和 `docs/STM32_
 
 建议按以下顺序推进，每一步先做无运动模拟，再做单项实机验证：
 
-1. 烧录本次 STM32 编译产物，先用 `LINE_STATUS` 验证白地、黑线和活动状态，再复测 `LINE_START`；同时为外部源码、烧录固件和实机记录建立可追溯版本关系。
-2. 为 CompetitionRunner 设计独立、显式的 live 启动入口，补齐连接、握手、循环、STOP 确认和异常关闭生命周期；在完成安全审查前保持 `competition/main.py` 默认 simulation mode。
-3. STM32 端事件经实机确认后，再由协议适配层把它们映射为 Runner 事件；不要直接把尚未验证的字符串加入 Stm32Link 或 NavigationController。
-4. 现场测量 Tag、T 字路口和停车点，填写 `field_model.py` 中的 TODO；固定相机后再标定面积和误差阈值。
-5. 给 K230D 解析、AprilTag 目标选择、任务转移和协议格式增加不连接硬件的单元测试及串口 mock。
-6. 统一配置与依赖记录，但迁移时保持已验证设备路径、速度、Servo 角度、Stepper 步数和延时原值不变。
+1. 在安全空旷场地单独运行 `test_line_to_tag.py`，从保守、可提前停车的 `arrival_area` 开始，校准实际停车距离并回归目标错失、偶发丢帧、正常 ARRIVED 和 Ctrl+C STOP。
+2. 单独设计四路全白安全停车和 T 字路口策略；本轮不修改 STM32 控制逻辑，也不把这两个问题混入 Tag 到站测试。
+3. 为 CompetitionRunner 设计独立、显式的 live 启动入口，补齐连接、握手、循环、STOP 确认和异常关闭生命周期；在完成安全审查前保持 `competition/main.py` 默认 simulation mode。
+4. STM32 端事件经实机确认后，再由协议适配层把它们映射为 Runner 事件；不要直接把尚未验证的字符串加入 Stm32Link 或 NavigationController。
+5. 现场测量 Tag、T 字路口和停车点，填写 `field_model.py` 中的 TODO；固定相机后再继续标定面积和误差阈值。
+6. 给 K230D 解析、任务转移和协议格式继续增加不连接硬件的单元测试及串口 mock。
+7. 统一配置与依赖记录，但迁移时保持已验证设备路径、速度、Servo 角度、Stepper 步数和延时原值不变。
 
-当前最准确的完成度描述是：底层执行和各视觉/机械能力已具备，旧入口局部联调已完成；比赛分层、无副作用模拟入口、第一版事件调度、机械臂任务适配、视觉接近和 Pi 端导航抽象已建立；真实事件源、live 生命周期、自动路线、Tag 姿态修正、独立橙色/紫色取料、实机集成回归和系统化自动测试仍未完成。
+当前最准确的完成度描述是：STM32 直线巡线和 AprilTag 单项检测已经现场可用，Pi 已完成“STM32 巡线 + 指定 Tag 面积连续确认 + STOP 到站”的第一版软件闭环及 Fake 回归；该闭环尚未实车联调，`arrival_area` 尚未定标，全白安全、T 字路口、真实 Runner 接入、自动路线、Tag 姿态修正和完整比赛流程仍未完成。
