@@ -50,7 +50,7 @@ robogame/
 └── AGENTS.md
 ```
 
-仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程文件；Git 历史中也没有发现这些文件。当前仓库实质上是 Raspberry Pi 端工程以及与 STM32 交互所需的协议调用代码，而不是完整的上下位机单体仓库。
+Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程文件；Git 历史中也没有这些文件。当前 STM32 源码位于外部目录 `D:\Code\V1.3_vision\V1.3`，Keil 工程为 `MDK-ARM\f407_ustc_2022_robogame.uvprojx`。该外部目录没有可用 Git 历史，因此源码、编译产物与当前实机已烧录固件之间仍缺少版本标识。
 
 ## 3. 硬件架构
 
@@ -63,10 +63,10 @@ robogame/
 | 麦克纳姆轮底盘 | 全向移动 | 由 STM32 执行 `VEL` 等运动命令 | 项目记录为已验证 |
 | Servo 机械臂 | 抓取、搬运、搭建 | 代码使用 Servo 索引 0-4 | 动作序列记录为已实机验证 |
 | TB6600 + Stepper | 机械臂升降/直线运动 | STM32 接收步数与 pps | 动作序列记录为已实机验证 |
-| 巡线传感器 | 黑线检测 | 由 STM32 侧处理 | 型号、数量、引脚和算法不在本仓库 |
+| 幻尔四路巡线传感器 | 黑线检测 | STM32 软件 I2C：PC4=SCL、PC5=SDA，低 4 位 1=黑线 | 外部 STM32 源码可确认；接线/I2C 实机状态待查 |
 | 底盘电机及驱动 | 底盘执行 | 由 STM32 侧控制 | 电机和驱动器具体型号不在本仓库 |
 
-当前资料还缺少完整 BOM、供电树、接线图、GPIO/定时器/串口引脚表、传感器型号及 STM32 固件版本标识。
+当前资料还缺少完整 BOM、供电树、接线图以及可追溯的 STM32 固件版本标识；巡线传感器型号和源码引脚定义已确认，但尚未通过本次修改后的固件完成现场回归。
 
 ## 4. 软件架构
 
@@ -93,7 +93,7 @@ robogame/
 - 执行 Stepper 指定步数运动并报告完成。
 - 提供命令 ACK、完成通知和错误回复。
 
-上述职责来自 Pi 端调用、测试脚本和项目已有记录。由于 STM32 源码不在仓库，接收缓冲、参数校验、看门狗、底层电机闭环和中断实现无法在本次分析中复核。
+上述职责已由 Pi 端调用以及外部 STM32 源码交叉确认。STM32 源码仍不属于本 Git 仓库；当前已复核 USART1 命令解析、控制权切换、巡线软件 I2C、LineNav 周期更新和停车路径，但不能据此宣称新固件已经烧录或通过实车验证。
 
 ### 4.3 通信方式
 
@@ -110,7 +110,7 @@ robogame/
 | Pi 车载环境与设备接入 | 已完成基础部署 | Python 3.13、虚拟环境和 USB 设备已建立；仓库没有依赖锁定文件 |
 | Pi ↔ STM32 串口通信 | 已验证 | 正式 by-id 路径和 115200 波特率已固定；请求/响应代码正在使用 |
 | STM32 通信抽象层 | 骨架完成，未实机回归 | `Stm32Link` 封装 HELLO_STM32、STOP、VEL、SERVO_GET、SERVO_SET、STEPPER_MOVE，并要求显式 `connect()` |
-| STM32 底盘、电机、巡线 | 底层已验证，上层整合不完整 | 项目明确这些底层模块已完成；仓库仅有 Pi 测试端，没有 STM32 源码 |
+| STM32 底盘、电机、巡线 | 底盘可运动；巡线故障待现场复测 | 现场 `FORWARD` 正常；旧固件 `LINE_START` 仅 ACK 后不动。当前外部源码已加入只读 `LINE_STATUS`、启动传感器预检和 `ERR,LINE_SENSOR_IO`，Keil 编译通过但尚未烧录/实车验证 |
 | Servo、Stepper、机械臂 | 动作层已验证 | `ArmSequence` 可复用，三组搭建动作和安全 HOME 已保留；不要改动参数 |
 | K230D 物块视觉 | 单项检测已验证 | 当前主控能解析目标并完成对准/接近；完整橙色、紫色任务切换尚未接入 |
 | K230D 接口层 | 骨架完成，未实机回归 | `K230Link` 封装连接生命周期、现有 `TARGET` / `NO_TARGET` 解析格式和最新消息读取 |
@@ -248,7 +248,7 @@ python tests/test_localization.py
 
 ### 6.5 STM32 入口
 
-本仓库没有 STM32 工程，无法给出真实的 `main.c` 路径。必须从固件仓库或工程备份补充入口、工程配置和固件版本。
+STM32 不在本 Git 仓库中。当前外部源码入口为 `D:\Code\V1.3_vision\V1.3\Core\Src\main.c`，Keil 工程为 `D:\Code\V1.3_vision\V1.3\MDK-ARM\f407_ustc_2022_robogame.uvprojx`。2026-09-11 对巡线诊断修改做过 ARMCC V5 全量重编译，结果为 0 error、1 个原有 `Test_All` 未引用警告；仍需人工烧录和现场验证。
 
 ## 7. 当前测试状态
 
@@ -264,7 +264,7 @@ python tests/test_localization.py
 - Servo、Stepper 与完整三组机械臂搭建动作。
 - K230D 视觉对准、前进、停车确认和人工触发搭建的第一版联调。
 
-本次橙色抓取考古只做源码、Git 历史、构建清单和文档的静态检查，并复查 Python 语法、import 无副作用及当前 `grab_orange() == NotImplemented` 的安全阻塞行为；没有连接串口、摄像头或运行任何会运动硬件的脚本，因此没有重新执行上述实机测试。
+2026-09-11 的巡线排查确认：Pi→STM32 命令、底盘和基础运动正常；旧固件表现为 `LINE_START` 返回 ACK 但车辆不动。源码静态分析表明 ACK 当时只证明 LineNav 已置 Active，随后第一次软件 I2C 读取失败会立即撤销 Active 并紧急停车。诊断补丁只做过静态检查、Keil 编译和 Pi Python 语法检查，没有连接串口、烧录或运行任何会运动硬件的脚本，因此根因仍需用 `LINE_STATUS` 现场闭环确认。
 
 ### 7.2 测试代码性质
 
@@ -276,7 +276,7 @@ AprilTag 两个脚本同样是相机人工测试，不包含断言。当前仓�
 
 1. `CompetitionRunner` 已定义第一版事件顺序，但 `LINE_DONE`、`TARGET_READY`、`ARM_DONE`、`BUILD_DONE` 目前均没有真实生产者，只能由测试或未来适配层注入。
 2. `competition/main.py` 固定使用 simulation mode，尚未实现显式连接、握手、运行循环、统一退出 STOP 和资源关闭；当前可运动的联调入口仍是 `main_controller_align.py`。
-3. Pi 端目前只能发送已有 `LINE_START` 和 STOP；STM32 巡线与比赛任务之间仍缺少经过验证的到站、路口、完成和错误事件，`ARRIVED` 不会自动进入。
+3. 当前 STM32 源码已有 `LINE_START`、`LINE_STOP`、只读 `LINE_STATUS` 和 `ERR,LINE_SENSOR_IO`；这些新增协议尚未烧录/实测。巡线仍没有 LINE_DONE、到站或路口事件，`ARRIVED` 不会自动进入。
 4. 世界模型缺少六个 Tag 中心 `(x, y, yaw)`、黑线节点/线段长度和关键停车点实测值。
 5. AprilTag 目前只有像素误差和像素面积，没有相机内参、畸变校正、姿态估计或跨帧稳定策略。
 6. K230D 的橙色、紫色检测结果如何触发取料尚未定义；TaskController 已有接口，但现有 ArmSequence 没有经过确认的独立橙色/紫色抓取动作。STM32 `Test_All()` 中虽有一个禁用的“±3000/±5000 + 底盘移动”旧候选，但缺少颜色/存放语义、调用证据、起始高度和实机版本确认，不能直接采用。
@@ -284,7 +284,7 @@ AprilTag 两个脚本同样是相机人工测试，不包含断言。当前仓�
 8. 没有 `requirements.txt` 或其他依赖锁定文件。已知 Pi 环境包含 `pyserial`、`numpy`、`opencv-python-headless` 和 `pupil_apriltags`，但版本没有记录。
 9. `main_controller_align.py` 在模块顶层打开串口，且主 `try/finally` 在串口打开和启动等待之后才开始；它不适合被其他模块 import。
 10. 当前主控启动时没有执行 `HELLO_STM32,1` 版本握手；独立机械臂入口会执行。
-11. Pi 仓库不包含 STM32 源码；已只读检查外部工程 `D:\Code\V1.3_vision\V1.3`，但该目录没有可用 Git 历史，也没有与当前烧录固件/实机测试记录的版本对应关系。
+11. Pi 仓库不包含 STM32 源码；外部工程 `D:\Code\V1.3_vision\V1.3` 已完成本次巡线诊断修改和本地编译，但该目录没有可用 Git 历史，也没有与当前烧录固件/实机测试记录的版本对应关系。
 12. `strategy/mission.py` 的旧任务元数据尚未迁移到新的 `competition.MissionState`，两层接口暂时并存。
 
 ## 9. 现有文档评估
@@ -297,16 +297,16 @@ AprilTag 两个脚本同样是相机人工测试，不包含断言。当前仓�
 | `docs/FIELD_DESCRIPTION.md` | 当前场地事实主文档 | 官方尺寸与 TODO 分界清晰；绝对坐标仍需现场测量 |
 | `tests/README.md` | 可作为硬件测试安全说明 | 尚未列出两个 AprilTag 测试脚本 |
 | `legacy/README.md` | 可继续使用 | 清楚标出旧脚本和旧协议，不应作为现役入口 |
-| `docs/PI_STM32_PROTOCOL.md` | 本次新增 | 作为当前 Pi 端协议基线；需用 STM32 源码进一步交叉验证 |
+| `docs/PI_STM32_PROTOCOL.md` | 本次新增 | 已与外部 STM32 当前源码交叉验证；新增巡线诊断仍待烧录和实机确认 |
 | `docs/SOFTWARE_ARCHITECTURE.md` | 本次新增 | 描述当前实际链路和目标整合边界 |
 
-此前项目上下文曾引用 `docs/STM32_PROJECT_MAP.md` 和 `docs/STM32_SAFETY_PATCHES.md`，但本次工作区和 Git 历史中均未找到这两个文件。若文档位于另一个 STM32 仓库，应复制受控版本或建立明确交叉链接。
+Pi 工作区和 Git 历史中没有 `docs/STM32_PROJECT_MAP.md` 和 `docs/STM32_SAFETY_PATCHES.md`；同名资料存在于外部 STM32 工程，但未纳入 Pi 仓库版本管理。需要跨仓库引用时应记录外部工程版本或构建标识，不能把外部未跟踪文件视为 Pi 仓库内容。
 
 ## 10. 下一阶段开发建议
 
 建议按以下顺序推进，每一步先做无运动模拟，再做单项实机验证：
 
-1. 为外部 STM32 工程、当前烧录固件和实机测试记录建立可追溯版本关系，补齐接收端协议、参数边界、错误码和巡线事件定义。
+1. 烧录本次 STM32 编译产物，先用 `LINE_STATUS` 验证白地、黑线和活动状态，再复测 `LINE_START`；同时为外部源码、烧录固件和实机记录建立可追溯版本关系。
 2. 为 CompetitionRunner 设计独立、显式的 live 启动入口，补齐连接、握手、循环、STOP 确认和异常关闭生命周期；在完成安全审查前保持 `competition/main.py` 默认 simulation mode。
 3. STM32 端事件经实机确认后，再由协议适配层把它们映射为 Runner 事件；不要直接把尚未验证的字符串加入 Stm32Link 或 NavigationController。
 4. 现场测量 Tag、T 字路口和停车点，填写 `field_model.py` 中的 TODO；固定相机后再标定面积和误差阈值。

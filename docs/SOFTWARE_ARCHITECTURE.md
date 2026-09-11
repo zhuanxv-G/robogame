@@ -30,6 +30,7 @@ Logitech C270 ──USB Video───┼──> Raspberry Pi 5
 | --- | --- | --- | --- |
 | 设备/协议 | `config.py` | 保存正式设备路径和 baudrate | 存在，但入口仍重复常量 |
 | 设备/协议 | `hardware/stm32_link.py` | STM32 串口所有权，HELLO/STOP/VEL/Servo/Stepper 请求与 ACK/DONE/ERR | 骨架完成；显式连接，未迁移旧入口 |
+| 外部实时执行 | `D:\Code\V1.3_vision\V1.3` | STM32 USART1 解析、控制权、底盘、巡线、Servo、Stepper | 不在 Pi Git 仓库；当前源码可读可编译，实机固件版本待关联 |
 | 设备/协议 | `arm_sequence.py` 中的请求方法 | HELLO、STOP、Servo、Stepper 请求/回复 | 已用于正式入口 |
 | K230D 输入 | `vision/k230_link.py` | 显式连接 K230D，解析 TARGET/NO_TARGET | 骨架完成；未迁移旧入口 |
 | K230D 解析 | `main_controller_align.py::parse_k230` | 解析 TARGET/NO_TARGET | 已用于当前主控 |
@@ -129,6 +130,25 @@ NavigationController 不拥有串口或摄像头，只使用入口注入的共�
 - `handle_event()` 仅预留并返回 `NotImplemented`。没有定义或消费 `LINE_DONE`、`TAG_REACHED`、`TASK_DONE` 等未验证协议。
 
 `ARRIVED` 也是预留状态，当前没有任何路径自动进入。已有 `navigation/field_model.py` 提供线路连接和 Tag 语义，但坐标、线段长度、路口位置与停车点仍未标定，因此不能生成真实导航路线。
+
+当前外部 STM32 源码中的巡线执行链为：
+
+```text
+LINE_START
+  -> LineNav.Stop() + Robot.Emergency_Stop()
+  -> 只读传感器预检
+       失败 -> 保持 STOP，ERR,LINE_SENSOR_IO
+       成功 -> ControlMode=LINE_FOLLOW
+            -> LineNav.Start_Follow(0.20 m/s)
+            -> ACK,LINE_START
+  -> main 循环 LineNav.Update()（10 ms 节流）
+       -> Follow_Straight() 软件 I2C 读四路传感器
+       -> Robot.Apply_Velocity(LINE_FOLLOW, velocity)
+       -> 运行期 I2C 失败时 Active=0 + Emergency_Stop()
+          并由 RpiUart 一次性上报 ERR,LINE_SENSOR_IO
+```
+
+`LINE_STATUS` 是独立只读诊断路径：它只采样四路传感器并回报本次读取结果与 Active，不切换 ControlMode、不启动或停止 LineNav，也不写底盘、Servo、Stepper。该协议已通过编译，尚待烧录和现场验证；它不是 LINE_DONE 或路口事件。
 
 ### 3.4 CompetitionRunner 事件调度
 
@@ -312,6 +332,8 @@ NavigationController 同样只持有注入的 Stm32Link/AprilTagService。材料
 - ARM_BUILD 阶段不再发送底盘运动命令。
 - Ctrl+C、运行异常和 finally 路径尝试 STOP 并关闭串口。
 - Stepper 动作等待 ACK 和 MOVE_DONE，收到 ERR 立即失败。
+- 当前 STM32 源码在 `LINE_START` 前预检传感器；失败保持停车并回复 `ERR,LINE_SENSOR_IO`。运行期读取失败仍立即停车，并一次性上报相同错误。
+- `LINE_STATUS` 只读采样，不取得底盘控制权，也不改变 LineNav Active。
 
 仍存在的架构风险：
 
@@ -325,6 +347,7 @@ NavigationController 同样只持有注入的 Stm32Link/AprilTagService。材料
 - CompetitionRunner 已在 ARM_DONE 后委托 build，但独立橙色和紫色取料动作没有实机确认；当前真实 grab_orange 返回 NotImplemented，非模拟流程会停在 GRAB_ORANGE。STM32 `Test_All()` 的禁用旧候选缺少任务语义、调用/版本证据和机械起始高度，不能作为已验证动作接入。
 - CompetitionRunner.run_once() 已定义 VisualApproachController READY/FAULT 的软件映射，但 main 不运行该循环，也没有进行 K230/STM32 实机集成回归。
 - NavigationController 没有巡线完成/路口/错误事件，`handle_event()` 和 `ARRIVED` 保持未实现；Tag 可见也不等于姿态已经对准。
+- 当前 `NavigationController` 尚未封装 `LINE_STATUS` 或消费 `ERR,LINE_SENSOR_IO`；本次只在人工诊断脚本中透传验证，避免在实测前扩展比赛状态机。
 
 ## 8. 配置和依赖
 
@@ -358,7 +381,7 @@ tests/test_apriltag.py       相机人工测试，无机器人运动
 tests/test_localization.py   相机+定位人工测试，无机器人运动
 tests/vel_test.py            会驱动底盘
 tests/motor_cmd_test.py      启动后会依次驱动底盘
-tests/line_test.py           可发送底盘/巡线命令
+tests/line_test.py           任意文本命令透传并原样显示回复；可安全发送 LINE_STATUS，也可发送会驱动底盘的命令
 tests/servo_test.py          通用命令透传，可能驱动任意执行器
 其他 uart/stm32 脚本        链路诊断，部分使用历史设备路径
 ```
@@ -373,7 +396,7 @@ tests/servo_test.py          通用命令透传，可能驱动任意执行器
 输入层
 ├── K230D：颜色/物块结果
 ├── USB Camera：AprilTag 结果
-└── STM32：ACK、DONE、ERR（巡线完成事件尚未定义）
+└── STM32：ACK、DONE、ERR、LINE_STATUS（巡线完成事件尚未定义）
         │
         v
 世界与状态层
@@ -393,6 +416,6 @@ tests/servo_test.py          通用命令透传，可能驱动任意执行器
 STM32 唯一串口链路
 ```
 
-仍未完成的部分包括：为 Runner 接入真实且经验证的事件源、设计 live 硬件生命周期、确认 STM32 巡线事件、实现路线/路口/到站逻辑、实现 Tag 姿态修正、补入 GET_PURPLE、实机确认独立橙色/紫色取料动作、实现 FINISH/FAULT 的完整安全收尾，以及系统化测试和后续实机回归。
+仍未完成的部分包括：烧录并实测 STM32 巡线诊断、确认传感器 I2C 故障点、为 Runner 接入真实且经验证的事件源、设计 live 硬件生命周期、定义巡线完成/路口事件、实现路线/到站逻辑、实现 Tag 姿态修正、补入 GET_PURPLE、实机确认独立橙色/紫色取料动作、实现 FINISH/FAULT 的完整安全收尾，以及系统化测试和后续实机回归。
 
 实现顺序应继续优先保证协议和串口所有权，其次接入状态转换，最后再标定世界坐标和视觉阈值。不要在全自动状态机未可观测、未可安全停车前一次性叠加全部动作。
