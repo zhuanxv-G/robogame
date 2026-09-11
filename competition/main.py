@@ -14,6 +14,7 @@ if __package__ in (None, ""):
 
 from competition.mission_controller import MissionController
 from competition.navigation_controller import NavigationController
+from competition.competition_runner import CompetitionRunner
 from competition.task_controller import TaskController
 from competition.visual_approach_controller import VisualApproachController
 from arm_sequence import ArmSequence
@@ -32,8 +33,18 @@ def main() -> None:
     apriltag = AprilTagService()
     navigation = NavigationController(stm32, apriltag)
     visual_approach = VisualApproachController(k230, stm32)
+    runner = CompetitionRunner(
+        mission,
+        navigation,
+        visual_approach,
+        tasks,
+        simulation_mode=True,
+    )
+    runner_status = runner.get_status()
 
     print("RoboGame competition skeleton initialized")
+    print("Runner mode: simulation")
+    print(f"Runner phase: {runner_status['phase'].value}")
     print(f"Mission state: {mission.current_state.value}")
     print(f"STM32 connected: {stm32.is_connected}")
     print(f"K230 connected: {k230.is_connected}")
