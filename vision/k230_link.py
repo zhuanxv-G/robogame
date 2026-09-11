@@ -11,6 +11,9 @@ from config import K230_BAUDRATE, K230_PORT
 class SerialConnection(Protocol):
     """Subset of the pyserial interface used by the K230D link."""
 
+    @property
+    def in_waiting(self) -> int: ...
+
     def readline(self) -> bytes: ...
 
     def reset_input_buffer(self) -> None: ...
@@ -137,6 +140,21 @@ class K230Link:
                 "K230D link is not connected; call connect() first"
             )
         return parse_k230_message(self._serial.readline())
+
+    def read_latest(self) -> K230Result | None:
+        """Read the newest queued message, matching the verified controller."""
+        if not self.is_connected or self._serial is None:
+            raise K230NotConnectedError(
+                "K230D link is not connected; call connect() first"
+            )
+
+        latest_data: bytes | None = None
+        while self._serial.in_waiting:
+            latest_data = self._serial.readline()
+
+        if latest_data is None:
+            return None
+        return parse_k230_message(latest_data)
 
     def close(self) -> None:
         """Close the K230D serial port if it is open."""

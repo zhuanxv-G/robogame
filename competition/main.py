@@ -14,6 +14,7 @@ if __package__ in (None, ""):
 
 from competition.mission_controller import MissionController
 from competition.task_controller import TaskController
+from competition.visual_approach_controller import VisualApproachController
 from arm_sequence import ArmSequence
 from hardware.stm32_link import Stm32Link
 from vision.apriltag_service import AprilTagService
@@ -28,6 +29,7 @@ def main() -> None:
     tasks = TaskController(arm)
     k230 = K230Link()
     apriltag = AprilTagService()
+    visual_approach = VisualApproachController(k230, stm32)
 
     print("RoboGame competition skeleton initialized")
     print(f"Mission state: {mission.current_state.value}")
@@ -35,6 +37,7 @@ def main() -> None:
     print(f"K230 connected: {k230.is_connected}")
     print(f"AprilTag camera connected: {apriltag.is_connected}")
     print(f"Task controller: {type(tasks).__name__}")
+    print(f"Visual approach state: {visual_approach.current_state.value}")
 
 
 if __name__ == "__main__":
