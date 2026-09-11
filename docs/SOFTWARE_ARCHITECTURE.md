@@ -143,7 +143,7 @@ LINE_START
   -> 只读传感器预检
        失败 -> 保持 STOP，ERR,LINE_SENSOR_IO
        成功 -> ControlMode=LINE_FOLLOW
-            -> LineNav.Start_Follow(0.40 m/s)
+            -> LineNav.Start_Follow(0.80 m/s)
             -> ACK,LINE_START
   -> main 循环 LineNav.Update()（10 ms 节流）
        -> Follow_Straight() 软件 I2C 读四路传感器

@@ -110,7 +110,7 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 | Pi 车载环境与设备接入 | 已完成基础部署 | Python 3.13、虚拟环境和 USB 设备已建立；仓库没有依赖锁定文件 |
 | Pi ↔ STM32 串口通信 | 已验证 | 正式 by-id 路径和 115200 波特率已固定；请求/响应代码正在使用 |
 | STM32 通信抽象层 | 骨架完成，未实机回归 | `Stm32Link` 封装 HELLO_STM32、STOP、VEL、SERVO_GET、SERVO_SET、STEPPER_MOVE，并要求显式 `connect()` |
-| STM32 底盘、电机、巡线 | 直线巡线基本可用 | 当前 `LINE_START` 已能以 0.40 m/s 进入直线巡线，轻微蛇形暂可接受；全白仍继续前进，T 字路口留待后续处理 |
+| STM32 底盘、电机、巡线 | 直线巡线基本可用 | `LINE_START` 的基础速度已从 0.40 m/s 调整为 0.80 m/s，尚待实车回归；此前 0.40 m/s 直线巡线已现场可用，轻微蛇形暂可接受；全白仍继续前进，T 字路口留待后续处理 |
 | Servo、Stepper、机械臂 | 动作层已验证 | `ArmSequence` 可复用，三组搭建动作和安全 HOME 已保留；不要改动参数 |
 | K230D 物块视觉 | 单项检测已验证 | 当前主控能解析目标并完成对准/接近；完整橙色、紫色任务切换尚未接入 |
 | K230D 接口层 | 骨架完成，未实机回归 | `K230Link` 封装连接生命周期、现有 `TARGET` / `NO_TARGET` 解析格式和最新消息读取 |
@@ -260,7 +260,7 @@ python3 tests/test_line_to_tag.py --tag-id 2 --arrival-area 10000 --confirm-fram
 
 ### 6.5 STM32 入口
 
-STM32 不在本 Git 仓库中。当前外部源码入口为 `D:\Code\V1.3_vision\V1.3\Core\Src\main.c`，Keil 工程为 `D:\Code\V1.3_vision\V1.3\MDK-ARM\f407_ustc_2022_robogame.uvprojx`。历史记录显示 2026-09-11 的巡线诊断版本经 ARMCC V5 全量重编译为 0 error、1 个原有 `Test_All` 未引用警告；当前现场已确认直线巡线工作，但固件与本地构建的精确版本关联仍缺失。本轮未修改或编译 STM32 工程。
+STM32 不在本 Git 仓库中。当前外部源码入口为 `D:\Code\V1.3_vision\V1.3\Core\Src\main.c`，Keil 工程为 `D:\Code\V1.3_vision\V1.3\MDK-ARM\f407_ustc_2022_robogame.uvprojx`。2026-09-11 将 `LINENAV_DEFAULT_SPEED_M_S` 从 0.4f 调整为 0.8f 后，已使用 ARMCC V5 全量重编译，结果为 0 error、1 个原有 `Test_All` 未引用警告；该 0.80 m/s 固件尚未烧录或实车验证。
 
 ## 7. 当前测试状态
 

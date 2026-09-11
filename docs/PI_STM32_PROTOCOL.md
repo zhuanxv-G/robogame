@@ -139,7 +139,7 @@ Pi -> STM32: LINE_STATUS
 STM32 -> Pi: LINE_STATUS,<sensor_ok>,<s1>,<s2>,<s3>,<s4>,<active>
 ```
 
-- `LINE_START` 先停止旧 LineNav、紧急停车并清除 REMOTE 运动状态，再做一次不会驱动车辆的传感器预检。预检失败时保持 STOP 并回复 `ERR,LINE_SENSOR_IO`；成功后切换到 `LINE_FOLLOW`，以固定 `0.40 m/s` 启动非阻塞巡线并回复 ACK。
+- `LINE_START` 先停止旧 LineNav、紧急停车并清除 REMOTE 运动状态，再做一次不会驱动车辆的传感器预检。预检失败时保持 STOP 并回复 `ERR,LINE_SENSOR_IO`；成功后切换到 `LINE_FOLLOW`，以固定 `0.80 m/s` 启动非阻塞巡线并回复 ACK。
 - ACK 后由 STM32 主循环每 10 ms 节流调用 `LineNav.Update()`。运行期软件 I2C 失败时立即 `Active=0` 并紧急停车，随后一次性上报 `ERR,LINE_SENSOR_IO`。
 - `LINE_STOP` 停止 LineNav、紧急停车并回复 ACK。
 - `LINE_STATUS` 每次执行一次软件 I2C 读取，只报告状态；绝不切换 ControlMode、启停 LineNav、写底盘速度或操作 Servo/Stepper。
@@ -164,7 +164,7 @@ STM32 -> Pi: ERR,<details...>
 | `SERVO_GET,index` | 整数索引 | `SERVO_POS,index,angle` | 获取 Servo 当前角度 |
 | `SERVO_SET,index,angle` | 整数索引、角度 | 原参数回显 ACK | 设置 Servo 绝对角度 |
 | `STEPPER_MOVE,steps,pps` | 有符号步数、正 pps | 原参数回显 ACK，随后 DONE | Stepper 相对运动 |
-| `LINE_START` | 无 | `ACK,LINE_START` 或巡线错误 | 以 0.40 m/s 启动连续巡线 |
+| `LINE_START` | 无 | `ACK,LINE_START` 或巡线错误 | 以 0.80 m/s 启动连续巡线 |
 | `LINE_STOP` | 无 | `ACK,LINE_STOP` | 停止巡线并紧急停车 |
 | `LINE_STATUS` | 无 | `LINE_STATUS,ok,s1,s2,s3,s4,active` | 只读巡线传感器/运行状态 |
 
