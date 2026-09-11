@@ -2,6 +2,11 @@
 
 from .mission_controller import MissionController
 from .mission_state import MissionState
+from .navigation_controller import (
+    MaterialZone,
+    NavigationController,
+    NavigationState,
+)
 from .task_controller import TaskController
 from .visual_approach_controller import (
     VisualApproachController,
@@ -11,6 +16,9 @@ from .visual_approach_controller import (
 __all__ = [
     "MissionController",
     "MissionState",
+    "MaterialZone",
+    "NavigationController",
+    "NavigationState",
     "TaskController",
     "VisualApproachController",
     "VisualApproachState",

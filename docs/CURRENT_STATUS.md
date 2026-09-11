@@ -31,6 +31,7 @@ robogame/
 │   ├── mission_controller.py      # 仅管理状态的基础控制器
 │   ├── task_controller.py         # 复用已验证机械臂动作的任务接口
 │   ├── visual_approach_controller.py # K230 对准、接近和 READY 判断
+│   ├── navigation_controller.py   # 巡线启动与 Tag 观测导航抽象层
 │   └── main.py                    # 不连接硬件的未来比赛入口骨架
 ├── navigation/
 │   ├── localization.py            # AprilTag 轻量定位结果
@@ -75,6 +76,7 @@ robogame/
 - 根据 `error_x`、目标面积等信息进行轻量对准和接近判断。
 - 保存比赛场地区域、Tag 和巡线拓扑世界模型。
 - 保存比赛任务顺序及未来状态机接口。
+- 通过 `NavigationController` 统一记录巡线、材料区目标和 Tag 辅助定位状态。
 - 通过 `VisualApproachController` 管理 K230 对准、接近、READY 和安全停车状态。
 - 通过 `TaskController` 调度已有机械臂搭建和安全复位动作。
 - 通过唯一 STM32 串口连接发送底盘、Servo、Stepper 和 STOP 命令。
@@ -117,15 +119,16 @@ robogame/
 | AprilTagLocalization | 基础接口完成 | 每帧选择面积最大 Tag，输出语义名称和面积启发式 confidence |
 | 比赛世界模型 | 结构已建立，坐标未标定 | 官方尺寸和拓扑已结构化；绝对区域、Tag、路口坐标仍为 TODO |
 | 导航/任务状态定义 | 基础接口完成 | `competition.MissionState` 新增 FINISH、FAULT；`MissionController` 只负责显式切换和复位，没有运行时调度策略 |
+| competition 导航控制 | Pi 端抽象完成，未实机回归 | `NavigationController` 可发送已有 `LINE_START`、通过 Stm32Link STOP、记录材料区，并通过 AprilTagService 查询指定 Tag；没有巡线完成事件或自动路线 |
 | 机械臂任务控制 | 骨架完成，未实机回归 | `TaskController.build()` 复用 `ArmSequence.run_all()`，`reset_arm()` 复用 `safe_home()`；两种独立取料动作尚未确认 |
-| 比赛入口 | 安全骨架完成 | `python -m competition.main` 额外初始化 VisualApproachController，只打印 STOP 状态，不连接或运行任何硬件 |
+| 比赛入口 | 安全骨架完成 | `python -m competition.main` 初始化 NavigationController 和其他控制器，只打印 IDLE/STOP 状态，不连接或运行任何硬件 |
 | 完整比赛闭环 | 未完成 | 尚无统一入口串起巡线、Tag 定位、两类取料和搭建 |
 
 ## 6. 当前代码入口
 
 ### 6.1 未来比赛入口骨架：`competition/main.py`
 
-该入口当前创建 `MissionController`、`Stm32Link`、`ArmSequence`、`TaskController`、`K230Link`、`AprilTagService` 和 `VisualApproachController`，并打印任务、连接和视觉接近状态。`ArmSequence` 与 VisualApproachController 接收同一个 `Stm32Link`，没有第二个 STM32 串口所有者。入口不会调用任何 `connect()`、`update()` 或任务动作，不会打开串口或摄像头，也不会发送运动命令。安全检查方式为：
+该入口当前创建 `MissionController`、`Stm32Link`、`ArmSequence`、`TaskController`、`K230Link`、`AprilTagService`、`NavigationController` 和 `VisualApproachController`，并打印任务、连接和子控制器状态。ArmSequence、NavigationController 与 VisualApproachController 接收同一个 `Stm32Link`，没有第二个 STM32 串口所有者。入口不会调用任何 `connect()`、巡线、检测、视觉更新或任务动作，不会打开串口或摄像头，也不会发送运动命令。安全检查方式为：
 
 ```bash
 python -m competition.main
@@ -146,6 +149,15 @@ python -m competition.main
 - APPROACH 使用 `y = 0.20`；误差达到 `±70` 后回到 ALIGN。
 - pixels 继续使用 `alpha = 0.20` 的 EMA；面积至少 20000 且误差不超过 30 连续 3 帧后，必须收到 STOP ACK 才认为 `is_ready()` 成立。
 - 有效 `NO_TARGET` 不立即停车；目标丢失 0.30 s 或 K230 无有效数据 0.60 s 时通过 Stm32Link STOP 并清理接近状态。
+
+当前 NavigationController 的真实能力边界：
+
+- 使用独立于 MissionState 的 `IDLE`、`LINE_FOLLOWING`、`TAG_SEARCH`、`TAG_ALIGN`、`ARRIVED`、`FAULT` 状态。
+- `start_line_follow()` 只通过共享 Stm32Link 发送仓库已有的 `LINE_START`；不等待或推断巡线完成。
+- `stop_navigation()` 只通过 Stm32Link 发送现有 STOP。
+- `navigate_to_material_zone()` 只接受 `ORANGE` / `PURPLE` 并记录目标，不生成路线或底盘命令。
+- `align_with_tag()` 只调用 AprilTagService 读取一帧并记录指定 Tag 是否可见；`TAG_ALIGN` 目前不代表已经执行姿态修正。
+- `handle_event()` 返回 `NotImplemented`，没有假设 `LINE_DONE`、`TAG_REACHED` 或其他尚未验证的 STM32 事件。
 
 ### 6.2 整车联调入口：`main_controller_align.py`
 
@@ -198,7 +210,7 @@ python tests/test_localization.py
 - Servo、Stepper 与完整三组机械臂搭建动作。
 - K230D 视觉对准、前进、停车确认和人工触发搭建的第一版联调。
 
-本次只做语法、import、安全入口和无硬件 mock 检查，包括 VisualApproachController 的状态、阈值边界和超时路径；没有连接串口、摄像头或运行任何会运动硬件的脚本，因此没有重新执行上述实机测试。
+本次只做语法、import、安全入口和无硬件 mock 检查，包括 NavigationController 的巡线命令委托、停车、材料区记录、Tag 查找和异常状态；没有连接串口、摄像头或运行任何会运动硬件的脚本，因此没有重新执行上述实机测试。
 
 ### 7.2 测试代码性质
 
@@ -208,9 +220,9 @@ AprilTag 两个脚本同样是相机人工测试，不包含断言。当前仓�
 
 ## 8. 当前未完成任务和已知缺口
 
-1. `MissionController` 目前只保存状态；尚未调用 VisualApproachController 或 TaskController，也没有事件、合法转移策略或完整调度循环。
-2. `competition/main.py` 已建立 VisualApproachController、K230Link 和 Stm32Link 的对象依赖，但尚未连接硬件或调用 `update()`；当前可运动的联调入口仍是 `main_controller_align.py`。
-3. STM32 巡线与 Pi 任务状态之间缺少明确的开始、到站、路口和完成事件接口。
+1. `MissionController` 目前只保存状态；尚未调用 NavigationController、VisualApproachController 或 TaskController，也没有事件、合法转移策略或完整调度循环。
+2. `competition/main.py` 已建立 NavigationController 与共享 Stm32Link/AprilTagService 的对象依赖，但尚未连接硬件或调用导航动作；当前可运动的联调入口仍是 `main_controller_align.py`。
+3. Pi 端目前只能发送已有 `LINE_START` 和 STOP；STM32 巡线与比赛任务之间仍缺少经过验证的到站、路口、完成和错误事件，`ARRIVED` 不会自动进入。
 4. 世界模型缺少六个 Tag 中心 `(x, y, yaw)`、黑线节点/线段长度和关键停车点实测值。
 5. AprilTag 目前只有像素误差和像素面积，没有相机内参、畸变校正、姿态估计或跨帧稳定策略。
 6. K230D 的橙色、紫色检测结果如何触发取料尚未定义；TaskController 已有接口，但现有 ArmSequence 没有经过确认的独立橙色/紫色抓取动作。
@@ -225,7 +237,7 @@ AprilTag 两个脚本同样是相机人工测试，不包含断言。当前仓�
 
 | 文档 | 是否可继续使用 | 需要注意/补充 |
 | --- | --- | --- |
-| `README.md` | 可作为快速入口 | 目录树未列新模块，且错误地写着主控尚未接入机械臂 |
+| `README.md` | 可作为快速入口 | 目录树和比赛入口说明尚未列出新增的视觉接近与导航控制器 |
 | `docs/PI_ENV.md` | 可继续使用 | SSH、部署路径、Git 安全流程和正式设备路径仍有效 |
 | `docs/project_inventory.md` | 可作为历史盘点 | 它生成于机械臂重构前，依赖图和正式入口分析已经过时 |
 | `docs/FIELD_DESCRIPTION.md` | 当前场地事实主文档 | 官方尺寸与 TODO 分界清晰；绝对坐标仍需现场测量 |
@@ -241,10 +253,10 @@ AprilTag 两个脚本同样是相机人工测试，不包含断言。当前仓�
 建议按以下顺序推进，每一步先做无运动模拟，再做单项实机验证：
 
 1. 找回或关联 STM32 工程和固件版本，补齐接收端协议、参数边界、错误码和巡线事件定义。
-2. 在已建立的 VisualApproachController、TaskController 和共享 Stm32Link 依赖上设计显式连接、握手、控制循环、STOP 确认和异常关闭生命周期；实机接入前继续保持默认不连接硬件。
-3. 为 `MissionController` 增加经过无硬件测试的事件与合法转移策略，把 VisualApproachController 的 READY 显式交给取料/搭建任务，再接入巡线和 AprilTag 行为。
+2. 在已建立的 NavigationController、VisualApproachController、TaskController 和共享 Stm32Link 依赖上设计显式连接、握手、控制循环、STOP 确认和异常关闭生命周期；实机接入前继续保持默认不连接硬件。
+3. STM32 端事件经实机确认后，再为 `NavigationController.handle_event()` 增加事件映射，并由 MissionController 编排导航、视觉接近和任务控制器。
 4. 现场测量 Tag、T 字路口和停车点，填写 `field_model.py` 中的 TODO；固定相机后再标定面积和误差阈值。
 5. 给 K230D 解析、AprilTag 目标选择、任务转移和协议格式增加不连接硬件的单元测试及串口 mock。
 6. 统一配置与依赖记录，但迁移时保持已验证设备路径、速度、Servo 角度、Stepper 步数和延时原值不变。
 
-当前最准确的完成度描述是：底层执行和各视觉/机械能力已具备，旧入口局部联调已完成；比赛分层、无副作用入口、基础任务状态、机械臂任务适配和视觉接近组件已建立；完整调度循环、独立橙色/紫色取料、巡线/AprilTag 联动、硬件生命周期、实机集成回归和系统化自动测试仍未完成。
+当前最准确的完成度描述是：底层执行和各视觉/机械能力已具备，旧入口局部联调已完成；比赛分层、无副作用入口、基础任务状态、机械臂任务适配、视觉接近和 Pi 端导航抽象已建立；巡线事件闭环、自动路线、Tag 姿态修正、完整调度循环、独立橙色/紫色取料、实机集成回归和系统化自动测试仍未完成。
