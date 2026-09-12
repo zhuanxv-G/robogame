@@ -39,7 +39,7 @@ Logitech C270 ──USB Video───┼──> Raspberry Pi 5
 | 轻量定位 | `navigation/localization.py` | 选择主 Tag，输出语义、error_x、area、confidence | 模块和人工测试完成 |
 | 世界模型 | `navigation/field_model.py` | 场地事实、区域能力、Tag 地标和已确认拓扑边 | 左右橙色来源已分离；绝对坐标 TODO |
 | 兼容地图接口 | `navigation/field_map.py`、`tag_map.py` | 保持 `get_zone_by_tag()` 和旧 TAG_MAP 可用 | 已完成 |
-| 拓扑定位/规划 | `navigation/topological_navigation.py` | Tag 到逻辑位置更新、无权图 BFS 路径 | 纯软件完成；未接入 Runner 或运动执行 |
+| 拓扑定位/规划 | `navigation/topological_navigation.py` | Tag 到逻辑位置更新、无权图 BFS 路径 | 纯软件完成；仅由独立人工入口消费 ARRIVED，未接入 Runner 或运动执行 |
 | 导航状态接口 | `navigation/navigation_state.py` | LINE_FOLLOW、SEARCH_TAG、TAG_ALIGN、TASK_EXECUTE | 只定义，未运行 |
 | 比赛策略 | `strategy/mission.py` | START 到 BUILD 的任务顺序和元数据 | 只定义，未运行 |
 | 比赛状态 | `competition/mission_state.py` | START、FOLLOW_LINE、GET_ORANGE、GET_PURPLE、BUILD、FINISH、FAULT | 已定义 |
@@ -48,6 +48,7 @@ Logitech C270 ──USB Video───┼──> Raspberry Pi 5
 | 比赛任务控制 | `competition/task_controller.py` | 把比赛任务接口适配到已有 ArmSequence 动作 | build/reset 已接入；独立取料待确认 |
 | 视觉接近控制 | `competition/visual_approach_controller.py` | K230 对准、前进、READY 和超时停车 | 原逻辑已迁移；未接入比赛循环、未实机回归 |
 | 比赛导航控制 | `competition/navigation_controller.py` | 巡线启动、指定 Tag 面积连续确认、STOP 到站和状态观测 | 第一版软件闭环完成；阈值待标定，未接入 Runner、未实车联调 |
+| 人工导航联调 | `tests/test_navigation_topology_live.py` | 人工 START 后验证巡线、指定 Tag ARRIVED 和拓扑位置更新 | 入口完成、Fake 回归通过；尚未实机运行，不是 Runner |
 | 比赛入口 | `competition/main.py` | 初始化上述接口并打印状态 | 安全骨架完成；不连接硬件 |
 | 局部主控 | `main_controller_align.py` | K230D 对准、接近、停车、人工触发搭建 | 第一版联调完成 |
 | 机械动作 | `arm_sequence.py` | 已验证的三组搭建动作 | 已接入局部主控 |
@@ -135,6 +136,22 @@ NavigationController 不拥有串口或摄像头，只使用入口注入的共�
 - `handle_event()` 仅预留并返回 `NotImplemented`。没有定义或消费 `LINE_DONE`、`TAG_REACHED`、`TASK_DONE` 等未验证协议。
 
 `ARRIVED` 现在只表示“指定 Tag 面积连续达标且 Pi 已收到 STOP ACK”，不表示世界坐标到达，也不依赖 STM32 LINE_DONE。`arrival_area` 没有内置最终值，必须由调用方显式提供；已有 `navigation/field_model.py` 仍不能生成真实路线，因为坐标、线段长度、路口位置与停车点尚未标定。
+
+新增的独立人工联调入口保持这一判定不变：
+
+```text
+人工输入 START
+  -> AprilTagService.connect() + Stm32Link.connect()
+  -> NavigationController.start_line_to_tag(...)
+  -> update() 逐帧观察指定 Tag
+  -> 指定 Tag 连续达标 + STOP ACK -> ARRIVED
+  -> TopologicalNavigator.update_from_tag(confirmed_tag)
+  -> 打印 confirmed_tag / current_location 并退出
+```
+
+`tests/test_navigation_topology_live.py` 中的观测包装只保存同一次 `AprilTagService.detect()` 已返回的 Tag id，供低频状态打印使用；它不创建第二个 detector、不重复读取相机，也不参与 NavigationController 的目标过滤和 ARRIVED 判定。错误 Tag 可被打印，但只有 NavigationController 最终确认的目标 Tag 能更新拓扑位置。该脚本在 Ctrl+C、异常和 FAULT 退出路径尝试 STOP，并释放 Camera 与 STM32。
+
+该入口必须人工输入严格大写的 `START` 才会连接设备并启动巡线，目前尚未实机运行。它不是 CompetitionRunner，不调用 `plan_route()`，也没有实现 T 字路口检测、出口选择或真实转向。
 
 当前外部 STM32 源码中的巡线执行链为：
 
@@ -355,7 +372,7 @@ competition/main.py（当前 simulation mode，不连接）
 
 NavigationController 同样只持有注入的 Stm32Link/AprilTagService。材料区请求只保存目标；Tag 对准接口仍不生成姿态修正；Tag 辅助到站复用已有 `LINE_START` 和 STOP，只增加 Pi 侧逐帧观测与状态转换。CompetitionRunner 再持有三类控制器和 MissionController，不拥有任何端口或摄像头，本轮也未调用新能力。
 
-TopologicalNavigator 位于 NavigationController 的上层结果消费者位置，但尚未注入 CompetitionRunner：上层只有在 NavigationController 已对指定 Tag 完成 STOP ACK 并进入 ARRIVED 后，才应显式调用 `update_from_tag(tag_id)`。该分层不会增加第二个 STM32 串口或 Camera 所有者。
+TopologicalNavigator 位于 NavigationController 的上层结果消费者位置，但尚未注入 CompetitionRunner：独立人工入口只在 NavigationController 已对指定 Tag 完成 STOP ACK 并进入 ARRIVED 后调用 `update_from_tag(tag_id)`。该分层不会增加第二个 STM32 串口或 Camera 所有者。
 
 ## 7. 安全和故障流
 
@@ -420,8 +437,10 @@ K230_BAUDRATE=115200
 tests/test_apriltag.py       相机人工测试，无机器人运动
 tests/test_localization.py   相机+定位人工测试，无机器人运动
 tests/test_line_to_tag.py    人工确认后启动巡线，Tag 连续达标后 STOP；会驱动底盘
+tests/test_navigation_topology_live.py 人工确认后验证巡线、Tag ARRIVED 和拓扑更新；会驱动底盘
 tests/test_navigation_controller_unit.py  Fake STM32/AprilTag 纯软件状态测试
 tests/test_topological_navigation_unit.py 双橙色区域、Tag 定位和 BFS 纯软件测试
+tests/test_topological_navigation_live_unit.py 人工入口取消/错误 Tag/异常清理的纯软件测试
 tests/vel_test.py            会驱动底盘
 tests/motor_cmd_test.py      启动后会依次驱动底盘
 tests/line_test.py           任意文本命令透传并原样显示回复；可安全发送 LINE_STATUS，也可发送会驱动底盘的命令
@@ -429,7 +448,7 @@ tests/servo_test.py          通用命令透传，可能驱动任意执行器
 其他 uart/stm32 脚本        链路诊断，部分使用历史设备路径
 ```
 
-任何硬件测试都必须由人工逐个启动。同一时刻不得运行另一个占用 STM32 串口的程序；运动测试前需清空场地并准备急停。纯软件回归可单独运行 `python -m unittest discover -s tests -p "test_*_unit.py" -v`，不会打开串口或相机。
+任何硬件测试都必须由人工逐个启动。同一时刻不得运行另一个占用 STM32 串口的程序；运动测试前需清空场地并准备急停。相关纯软件回归可运行 `python -m unittest discover -s tests -p "*topological*" -v` 和 `python -m unittest discover -s tests -p "test_navigation_controller_unit.py" -v`，不会打开串口或相机。
 
 ## 10. 已落地骨架与下一步
 
