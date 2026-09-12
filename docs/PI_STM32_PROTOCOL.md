@@ -2,7 +2,7 @@
 
 > 文档状态：Pi 端协议基线，2026-09-11 与当前外部 STM32 源码同步。
 > 证据来源：Pi 端 `main_controller_align.py`、`arm_sequence.py`、`build_sequence.py`、`tests/`，以及外部 STM32 工程 `D:\Code\V1.3_vision\V1.3`。
-> 限制：STM32 工程不属于本 Git 仓库且没有可用 Git 历史；新增巡线诊断已经 Keil 编译，但尚未烧录和实车验证，不能据此认定现场固件已经支持。
+> 限制：STM32 工程不属于本 Git 仓库且没有可用 Git 历史；新增巡线诊断和第一版路口状态机已经 Keil 编译，但尚未烧录和实车验证，不能据此认定现场固件已经支持。
 
 ## 1. 链路参数
 
@@ -144,15 +144,50 @@ STM32 -> Pi: LINE_STATUS,<sensor_ok>,<s1>,<s2>,<s3>,<s4>,<active>
 - `LINE_STOP` 停止 LineNav、紧急停车并回复 ACK。
 - `LINE_STATUS` 每次执行一次软件 I2C 读取，只报告状态；绝不切换 ControlMode、启停 LineNav、写底盘速度或操作 Servo/Stepper。
 - `sensor_ok` 表示本次读取是否成功；`s1` 至 `s4` 为从左到右四路逻辑值（`1=黑线`、`0=白色`）；`active` 表示 LineNav 当前是否运行。若 `sensor_ok=0`，四路值是最近一次成功读取的缓存值，不能当作本次有效样本。
-- 当前没有 `LINE_DONE`、到站或路口完成回复。
+- `LINE_START` 现在同时启用下述路口检测骨架；它没有 `LINE_DONE` 或比赛到站语义。
 
-### 3.8 错误回复
+### 3.8 预设下一路口动作
+
+```text
+Pi -> STM32: NEXT_TURN,LEFT
+                NEXT_TURN,RIGHT
+                NEXT_TURN,STRAIGHT
+                NEXT_TURN,NONE
+STM32 -> Pi: ACK,NEXT_TURN,<turn>
+             或 ERR,NEXT_TURN
+```
+
+- 命令只保存一个 `pending turn`，不会启动巡线、改变速度或立即执行动作。
+- `NONE` 用于显式清除预设。`LEFT`、`RIGHT`、`STRAIGHT` 只在后续确认路口后消费一次。
+- `LINE_START` 的启动清理保留已预设动作，以支持 `NEXT_TURN` 后再 `LINE_START` 的顺序。
+- 全局 `STOP`、`LINE_STOP`、合法 `VEL` 和兼容方向命令会清除预设，避免之后误用旧动作。
+- 缺少参数、额外字段、大小写错误或未知方向都返回 `ERR,NEXT_TURN`，且不执行动作。
+
+### 3.9 路口事件与故障
+
+```text
+STM32 -> Pi: JUNCTION_DETECTED
+STM32 -> Pi: TURN_STARTED,<LEFT|RIGHT|STRAIGHT>
+STM32 -> Pi: TURN_DONE,<LEFT|RIGHT|STRAIGHT>
+
+STM32 -> Pi: ERR,NO_PENDING_TURN
+              ERR,TURN_TIMEOUT
+              ERR,REACQUIRE_TIMEOUT
+```
+
+第一版检测依据真实 T 字路口 CSV：普通线常见 `0110`，候选包含 `1110` 和 `1111`，等价于 `s1=s2=s3=1` 且 `s4` 任意。候选必须连续 3 个约 10 ms 的 `LineNav.Update()` 周期才确认；单帧 `1110` 不触发，`0000` 也绝不是路口。
+
+确认后按预设动作执行：LEFT 使用 `omega=+0.80 rad/s`，RIGHT 使用 `omega=-0.80 rad/s`，STRAIGHT 使用 `y=+0.20 m/s`。正负号沿用当前底盘定义（正 omega 为左转）。动作至少持续 250 ms（STRAIGHT 为 100 ms），并连续 3 个周期离开候选宽线后进入重捕阶段；最终必须连续 3 个周期重新读到普通线 `0110` 才发送 `TURN_DONE` 并恢复原 `0.80 m/s` `Follow_Straight()`。
+
+同一物理路口由锁存去重。动作完成后仍保持锁存，只有在恢复巡线状态后额外连续 5 个周期保持 `0110` 才 re-arm。动作离开宽线最多等待 1200 ms，重捕普通线最多等待 2000 ms；任一超时都会 `Emergency_Stop()`、进入 fault 并上报对应 ERR。确认路口时若 pending turn 为 NONE，同样立即停车并上报 `ERR,NO_PENDING_TURN`。普通 LINE_FOLLOW 下持续 `0000` 仍可能按旧逻辑前进，这是未解决的已知风险；动作/重捕阶段则会被上述 timeout 限制。
+
+### 3.10 错误回复
 
 ```text
 STM32 -> Pi: ERR,<details...>
 ```
 
-`ArmSequence.wait_for()` 对任意 `ERR,` 前缀立即抛出异常。`main_controller_align.py` 在普通运动阶段只打印 `ERR...`。巡线相关已确认错误为 `ERR,LINE_START_FAILED` 和 `ERR,LINE_SENSOR_IO`；其他命令仍按各自格式、范围、不可用或忙状态返回 `ERR,...`。
+`ArmSequence.wait_for()` 对任意 `ERR,` 前缀立即抛出异常。`main_controller_align.py` 在普通运动阶段只打印 `ERR...`。巡线相关错误包括 `ERR,LINE_START_FAILED`、`ERR,LINE_SENSOR_IO`、`ERR,NEXT_TURN`、`ERR,NO_PENDING_TURN`、`ERR,TURN_TIMEOUT` 和 `ERR,REACQUIRE_TIMEOUT`；其他命令仍按各自格式、范围、不可用或忙状态返回 `ERR,...`。
 
 ## 4. 命令与回复总表
 
@@ -167,6 +202,9 @@ STM32 -> Pi: ERR,<details...>
 | `LINE_START` | 无 | `ACK,LINE_START` 或巡线错误 | 以 0.80 m/s 启动连续巡线 |
 | `LINE_STOP` | 无 | `ACK,LINE_STOP` | 停止巡线并紧急停车 |
 | `LINE_STATUS` | 无 | `LINE_STATUS,ok,s1,s2,s3,s4,active` | 只读巡线传感器/运行状态 |
+| `NEXT_TURN,turn` | NONE / LEFT / RIGHT / STRAIGHT | `ACK,NEXT_TURN,turn` 或 `ERR,NEXT_TURN` | 只预设下一路口动作 |
+
+异步 LineNav 事件不对应新的 Pi 请求：`JUNCTION_DETECTED` 表示连续确认成功，`TURN_STARTED,...` 表示预设动作已开始，`TURN_DONE,...` 表示普通线已稳定重捕并恢复巡线。
 
 ## 5. 参数边界
 
@@ -196,11 +234,13 @@ RIGHT
 LINE_START
 LINE_STOP
 LINE_STATUS
+NEXT_TURN,LEFT
 ```
 
 - `FORWARD/BACKWARD/LEFT/RIGHT` 会切换到 REMOTE 并驱动底盘；仅在清空场地并准备急停后人工测试。
 - `LINE_START` 会驱动底盘；`LINE_STOP` 会停车。
 - 只有 `LINE_STATUS` 被设计为绝对不驱动车辆的巡线诊断命令。
+- `NEXT_TURN,...` 本身不驱动底盘，但后续 `LINE_START` 在确认路口后会执行该动作。
 - 当前源码还支持 `SERVO_NUDGE`、`STEPPER_NUDGE` 和 `STEPPER_SLOW` 人工标定命令；它们会操作执行器，不属于本次巡线诊断范围。
 
 以下内容只见于 `legacy/` 或 GPIO UART 专项测试，不应发送给当前正式 USB 协议：
@@ -269,6 +309,8 @@ main_controller_align.py（唯一 serial.Serial）
 2. 分别在白地、普通黑线和四路全黑条件下记录 `LINE_STATUS`，确认接线顺序与 `1=黑线` 极性。
 3. 若 `sensor_ok=0`，继续检查 PC4/PC5 接线、供电、上拉、设备地址及三个 ACK 阶段；不要绕过传感器强制启动车辆。
 4. 建立外部 STM32 源码、Keil 产物、烧录时间和现场结果的版本对应关系。
-5. 巡线到站、路口或完成事件仍未定义；本次没有新增 LINE_DONE 状态机。
+5. 按 `LEFT -> RIGHT -> STRAIGHT` 顺序在安全场地逐项验证路口事件、动作方向、重新捕线和继续巡线；STRAIGHT 只在确认存在真实直行出口时测试。
+6. 现场标定候选确认次数、re-arm 次数、250/100 ms 最小动作时间、0.20 m/s 动作前进速度、0.80 rad/s 转速以及 1200/2000 ms timeout；在此之前不能把第一版参数视为最终值。
+7. `LINE_DONE` 和比赛到站事件仍未定义；`TURN_DONE` 只表示一次路口动作完成并重新捕获 `0110`。
 
-完成上述验证前，不要让比赛状态机依赖新增巡线诊断，也不要扩大任何运动参数。
+完成上述验证前，不要让比赛状态机依赖新增路口事件，也不要扩大任何运动参数。

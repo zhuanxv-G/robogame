@@ -29,8 +29,8 @@ Logitech C270 ──USB Video───┼──> Raspberry Pi 5
 | 层 | 当前文件 | 职责 | 接入状态 |
 | --- | --- | --- | --- |
 | 设备/协议 | `config.py` | 保存正式设备路径和 baudrate | 存在，但入口仍重复常量 |
-| 设备/协议 | `hardware/stm32_link.py` | STM32 串口所有权，HELLO/STOP/VEL/Servo/Stepper 请求与 ACK/DONE/ERR | 骨架完成；显式连接，未迁移旧入口 |
-| 外部实时执行 | `D:\Code\V1.3_vision\V1.3` | STM32 USART1 解析、控制权、底盘、巡线、Servo、Stepper | 不在 Pi Git 仓库；当前直线巡线已现场基本验证，全白和 T 字路口待处理 |
+| 设备/协议 | `hardware/stm32_link.py` | STM32 串口所有权，HELLO/STOP/VEL/NEXT_TURN/Servo/Stepper 与路口事件 | 骨架完成；显式连接，未迁移旧入口 |
+| 外部实时执行 | `D:\Code\V1.3_vision\V1.3` | STM32 USART1 解析、控制权、底盘、巡线、Servo、Stepper | 不在 Pi Git 仓库；直线巡线已现场验证，第一版路口状态机已编译但待实车；普通全白风险仍存在 |
 | 设备/协议 | `arm_sequence.py` 中的请求方法 | HELLO、STOP、Servo、Stepper 请求/回复 | 已用于正式入口 |
 | K230D 输入 | `vision/k230_link.py` | 显式连接 K230D，解析 TARGET/NO_TARGET | 骨架完成；未迁移旧入口 |
 | K230D 解析 | `main_controller_align.py::parse_k230` | 解析 TARGET/NO_TARGET | 已用于当前主控 |
@@ -49,7 +49,8 @@ Logitech C270 ──USB Video───┼──> Raspberry Pi 5
 | 视觉接近控制 | `competition/visual_approach_controller.py` | K230 对准、前进、READY 和超时停车 | 原逻辑已迁移；未接入比赛循环、未实机回归 |
 | 比赛导航控制 | `competition/navigation_controller.py` | 巡线启动、指定 Tag 面积连续确认、STOP 到站和状态观测 | Tag 3/4/5 第一轮实机联调完成；加入 STOPDBG 后的后续测试未再复现早前超时 |
 | 人工导航联调 | `tests/test_navigation_topology_live.py` | 人工 START 后验证巡线、指定 Tag ARRIVED 和拓扑位置更新 | 已取得实机成功结果并增加可选 STOP 时间线；不是 Runner |
-| 巡线传感器采样 | `tests/test_line_sensor_capture.py` | 只读轮询 LINE_STATUS、人工标记并保存 CSV | 工具与 Fake 测试完成；T 字路口尚未识别或转向 |
+| 巡线传感器采样 | `tests/test_line_sensor_capture.py` | 只读轮询 LINE_STATUS、人工标记并保存 CSV | 工具与 Fake 测试完成；真实 CSV 已作为路口第一版输入 |
+| 路口协议/人工入口 | `hardware/stm32_link.py`、`tests/test_junction_turn.py` | 预设 NEXT_TURN、解析事件、严格 START 后单项实机测试 | 协议和 Fake 测试完成；未接入 Runner，未实车验证 |
 | 比赛入口 | `competition/main.py` | 初始化上述接口并打印状态 | 安全骨架完成；不连接硬件 |
 | 局部主控 | `main_controller_align.py` | K230D 对准、接近、停车、人工触发搭建 | 第一版联调完成 |
 | 机械动作 | `arm_sequence.py` | 已验证的三组搭建动作 | 已接入局部主控 |
@@ -152,7 +153,7 @@ NavigationController 不拥有串口或摄像头，只使用入口注入的共�
 
 `tests/test_navigation_topology_live.py` 中的观测包装只保存同一次 `AprilTagService.detect()` 已返回的 Tag id，供低频状态打印使用；它不创建第二个 detector、不重复读取相机，也不参与 NavigationController 的目标过滤和 ARRIVED 判定。错误 Tag 可被打印，但只有 NavigationController 最终确认的目标 Tag 能更新拓扑位置。该脚本在 Ctrl+C、异常和 FAULT 退出路径尝试 STOP，并释放 Camera 与 STM32。
 
-该入口必须人工输入严格大写的 `START` 才会连接设备并启动巡线。现场已确认 Tag 4 在 `arrival_area=10000` 时约 80 cm 停车并更新为 `RIGHT_ORANGE_MATERIAL`，Tag 5 使用同一面积阈值时也基本在约 80 cm 停车；Tag 3 使用 `arrival_area=20000`、`confirm_frames=3` 连续三次约 57 cm 停车并更新为 `PURPLE_MATERIAL`。这些现场参数不作为代码默认值。该入口不是 CompetitionRunner，不调用 `plan_route()`，也没有实现 T 字路口检测、出口选择或真实转向。
+该入口必须人工输入严格大写的 `START` 才会连接设备并启动巡线。现场已确认 Tag 4 在 `arrival_area=10000` 时约 80 cm 停车并更新为 `RIGHT_ORANGE_MATERIAL`，Tag 5 使用同一面积阈值时也基本在约 80 cm 停车；Tag 3 使用 `arrival_area=20000`、`confirm_frames=3` 连续三次约 57 cm 停车并更新为 `PURPLE_MATERIAL`。这些现场参数不作为代码默认值。该入口不是 CompetitionRunner，不调用 `plan_route()`，也不调用新增 `NEXT_TURN` 路口能力。
 
 ### 3.3.1 STOP ACK 偶发超时诊断
 
@@ -201,7 +202,7 @@ LINE_START
           并由 RpiUart 一次性上报 ERR,LINE_SENSOR_IO
 ```
 
-`LINE_STATUS` 是独立只读诊断路径：它只采样四路传感器并回报本次读取结果与 Active，不切换 ControlMode、不启动或停止 LineNav，也不写底盘、Servo、Stepper。该协议已通过编译，尚待烧录和现场验证；它不是 LINE_DONE 或路口事件。
+`LINE_STATUS` 是独立只读诊断路径：它只采样四路传感器并回报本次读取结果与 Active，不切换 ControlMode、不启动或停止 LineNav，也不写底盘、Servo、Stepper。该协议已通过编译，尚待烧录和现场验证；它本身不是 LINE_DONE 或路口事件。
 
 ### 3.3.2 巡线传感器现场采样
 
@@ -217,7 +218,26 @@ LINE_START
 
 该入口不导入或调用 NavigationController、TopologicalNavigator、Camera、K230D、Servo、Stepper 或任何底盘接口；连接后不执行握手、STOP、LINE_START、LINE_STOP 或 VEL，退出时只关闭串口。终端标记采用主线程中的 `select()` 等待，不创建串口读取线程；标记附在下一条采样记录上，因此仍保持单一阶段性回复读取者。CSV 的 `sensor_ok=0` 行会原样保留，但四路位只代表 STM32 缓存，分析时不得当作本次有效读数。`logs/` 已在 `.gitignore` 中忽略。
 
-这项工作只建立可重复的现场数据入口。T 字路口当前处于“现场传感器模式采样阶段”，尚未定义稳定模式、自动识别条件、路口事件、出口选择或转向控制。
+这项工作建立了可重复的现场数据入口；多组 CSV 中的 `0110 -> 1110/1111 -> 0110` 已作为下面第一版状态机的真实依据。采样工具本身仍不执行任何动作。
+
+### 3.3.3 第一版路口执行链
+
+```text
+Pi Stm32Link.set_next_turn(LEFT / RIGHT / STRAIGHT)
+  -> NEXT_TURN,<turn> / ACK,NEXT_TURN,<turn>
+  -> LINE_START（现有0.80 m/s Follow_Straight）
+  -> STM32连续3个约10 ms周期匹配1110或1111
+  -> JUNCTION_DETECTED
+  -> 消费pending turn并发送TURN_STARTED,<turn>
+  -> 固定低速动作，离开宽线后进入REACQUIRE_LINE
+  -> 连续3周期重新读到0110
+  -> TURN_DONE,<turn>，恢复现有Follow_Straight
+  -> 再连续5周期0110后re-arm下一路口
+```
+
+候选逻辑只接受 `s1=s2=s3=1`（即 1110/1111），不会把 `0000` 当路口。LEFT/RIGHT 沿已确认坐标分别使用正/负 omega；STRAIGHT 仅以低速前进，不理解场地是否真的有直行出口。没有 pending turn 时立即急停并上报 `ERR,NO_PENDING_TURN`。动作离开宽线和重捕线分别有 1200 ms、2000 ms timeout，超时急停并上报 `ERR,TURN_TIMEOUT` 或 `ERR,REACQUIRE_TIMEOUT`。这些动作速度、时间与连续周期都集中为 LineNav 常量，尚待实车标定。
+
+Pi 只新增协议能力和人工入口，没有把路径节点转换成方向，也没有接入 CompetitionRunner。`tests/test_junction_turn.py --turn ...` 只有在操作者输入严格大写 `START` 后才连接 STM32、预设动作并启动巡线；Ctrl+C 或异常会尝试 STOP 并关闭串口。
 
 ### 3.4 CompetitionRunner 事件调度
 
@@ -449,9 +469,9 @@ TopologicalNavigator 位于 NavigationController 的上层结果消费者位置�
 - CompetitionRunner 已把下层异常映射到 `MissionState.FAULT`，但 main 尚无 live 连接/循环/退出生命周期；统一 STOP、关闭顺序和失败恢复仍需在实机入口前补齐。
 - CompetitionRunner 已在 ARM_DONE 后委托 build，但独立橙色和紫色取料动作没有实机确认；当前真实 grab_orange 返回 NotImplemented，非模拟流程会停在 GRAB_ORANGE。STM32 `Test_All()` 的禁用旧候选缺少任务语义、调用/版本证据和机械起始高度，不能作为已验证动作接入。
 - CompetitionRunner.run_once() 已定义 VisualApproachController READY/FAULT 的软件映射，但 main 不运行该循环，也没有进行 K230/STM32 实机集成回归。
-- NavigationController 仍没有巡线完成/路口协议事件，`handle_event()` 保持未实现；`ARRIVED` 仅是 Pi 的 Tag 面积到站条件，不代表姿态已经对准。
+- Stm32Link 已能解析路口事件，但 NavigationController 尚未消费它们，`handle_event()` 保持未实现；`TURN_DONE` 不是 `LINE_DONE`，`ARRIVED` 仍只表示 Pi 的 Tag 面积到站条件。
 - 当前 `NavigationController` 尚未封装 `LINE_STATUS` 或消费 `ERR,LINE_SENSOR_IO`；本次只在人工诊断脚本中透传验证，避免在实测前扩展比赛状态机。
-- STM32 四路全白时继续前进是已知风险，T 字路口也尚未处理；二者不由 Pi 的 Tag 到站逻辑掩盖。
+- STM32 普通 LINE_FOLLOW 四路全白时继续前进仍是已知风险；新增路口动作阶段会由 timeout 停车，但不能掩盖普通巡线风险。
 - TopologicalNavigator 只有认知和规划能力；无路径时抛出 `RouteNotFoundError`，不会补一条假直线、估算坐标或触发运动。
 
 ## 8. 配置和依赖
@@ -492,6 +512,8 @@ tests/test_topological_navigation_live_unit.py 人工入口取消/错误 Tag/异
 tests/test_stm32_stop_unit.py STOP ACK 时序、无关行、迟到 ACK 歧义、无 ACK 和 ERR 的 FakeSerial 测试
 tests/test_line_sensor_capture.py 只读 LINE_STATUS、人工标记和 CSV 现场采样；不驱动执行器
 tests/test_line_sensor_capture_unit.py LINE_STATUS 解析、失败状态、唯一命令、CSV/标记纯软件测试
+tests/test_junction_turn.py   严格START后预设并执行一个真实路口动作；会驱动底盘
+tests/test_junction_turn_unit.py NEXT_TURN/事件解析/START门禁的FakeSerial纯软件测试
 tests/vel_test.py            会驱动底盘
 tests/motor_cmd_test.py      启动后会依次驱动底盘
 tests/line_test.py           任意文本命令透传并原样显示回复；可安全发送 LINE_STATUS，也可发送会驱动底盘的命令
@@ -509,7 +531,7 @@ tests/servo_test.py          通用命令透传，可能驱动任意执行器
 输入层
 ├── K230D：颜色/物块结果
 ├── USB Camera：AprilTag 结果
-└── STM32：ACK、DONE、ERR、LINE_STATUS（巡线完成事件尚未定义）
+└── STM32：ACK、DONE、ERR、LINE_STATUS、JUNCTION/TURN事件
         │
         v
 世界与状态层
@@ -530,6 +552,6 @@ tests/servo_test.py          通用命令透传，可能驱动任意执行器
 STM32 唯一串口链路
 ```
 
-仍未完成的部分包括：采集并分析真实 T 字路口传感器模式、处理全白安全、实现并验证 T 字路口实时执行、把 ARRIVED 和拓扑路径接入 Runner、确认搭建区连线、设计 live 硬件生命周期、实现 Tag 姿态修正、补入 GET_PURPLE、实机确认独立橙色/紫色取料动作，以及完整安全收尾和系统化测试。STOPDBG 继续保留供早前偶发 ACK timeout 再次出现时使用。
+仍未完成的部分包括：实车标定并验证 T 字路口 LEFT/RIGHT/STRAIGHT、处理普通巡线全白安全、把路口事件/ARRIVED 和拓扑路径接入 Runner、确认搭建区连线、设计 live 硬件生命周期、实现 Tag 姿态修正、补入 GET_PURPLE、实机确认独立橙色/紫色取料动作，以及完整安全收尾和系统化测试。STOPDBG 继续保留供早前偶发 ACK timeout 再次出现时使用。
 
 实现顺序应继续优先保证协议和串口所有权，其次接入状态转换，最后再标定世界坐标和视觉阈值。不要在全自动状态机未可观测、未可安全停车前一次性叠加全部动作。

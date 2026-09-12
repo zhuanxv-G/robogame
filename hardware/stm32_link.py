@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Protocol
 
 from config import STM32_BAUDRATE, STM32_PORT
@@ -36,6 +38,56 @@ class Stm32NotConnectedError(RuntimeError):
 
 class Stm32ProtocolError(RuntimeError):
     """Raised when STM32 reports an ``ERR,...`` response."""
+
+
+class NextTurn(str, Enum):
+    """Direction that STM32 will execute at the next confirmed junction."""
+
+    NONE = "NONE"
+    LEFT = "LEFT"
+    RIGHT = "RIGHT"
+    STRAIGHT = "STRAIGHT"
+
+
+class LineNavigationEventType(str, Enum):
+    """Asynchronous LineNav events emitted by STM32."""
+
+    JUNCTION_DETECTED = "JUNCTION_DETECTED"
+    TURN_STARTED = "TURN_STARTED"
+    TURN_DONE = "TURN_DONE"
+
+
+@dataclass(frozen=True, slots=True)
+class LineNavigationEvent:
+    """Parsed asynchronous junction/turn event."""
+
+    event_type: LineNavigationEventType
+    turn: NextTurn | None = None
+
+
+def parse_line_navigation_event(line: str) -> LineNavigationEvent | None:
+    """Parse a LineNav event, returning ``None`` for unrelated protocol lines."""
+    normalized = line.strip()
+    if normalized == LineNavigationEventType.JUNCTION_DETECTED.value:
+        return LineNavigationEvent(LineNavigationEventType.JUNCTION_DETECTED)
+
+    fields = normalized.split(",")
+    if not fields or fields[0] not in {
+        LineNavigationEventType.TURN_STARTED.value,
+        LineNavigationEventType.TURN_DONE.value,
+    }:
+        return None
+    if len(fields) != 2:
+        raise Stm32ProtocolError(f"Invalid LineNav event: {line!r}")
+
+    try:
+        turn = NextTurn(fields[1])
+        event_type = LineNavigationEventType(fields[0])
+    except ValueError as exc:
+        raise Stm32ProtocolError(f"Invalid LineNav event: {line!r}") from exc
+    if turn is NextTurn.NONE:
+        raise Stm32ProtocolError(f"Invalid LineNav event: {line!r}")
+    return LineNavigationEvent(event_type, turn)
 
 
 class Stm32Link:
@@ -248,6 +300,26 @@ class Stm32Link:
         """Send the existing two-decimal ``VEL`` command without blocking."""
         command = f"VEL,{x:.2f},{y:.2f},{omega:.2f}"
         return self.send_command(command)
+
+    def set_next_turn(
+        self,
+        turn: NextTurn | str,
+        timeout: float = 2.0,
+    ) -> str:
+        """Preset one junction action and wait for its echoed ACK.
+
+        This command does not start LineNav and does not execute the action.
+        """
+        try:
+            normalized_turn = turn if isinstance(turn, NextTurn) else NextTurn(turn)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "turn must be NONE, LEFT, RIGHT, or STRAIGHT"
+            ) from exc
+
+        command = f"NEXT_TURN,{normalized_turn.value}"
+        self.send_command(command)
+        return self.wait_ack(command, timeout)
 
     def servo_get(self, index: int, timeout: float = 2.0) -> int:
         """Read a Servo angle with the existing ``SERVO_GET`` exchange."""
