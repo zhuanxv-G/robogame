@@ -350,7 +350,7 @@ LINE_MAP = {
 }
 
 
-# 仅包含已由规则图连接关系支持的无权拓扑；不含距离、坐标或转弯动作。
+# 仅包含已由规则图连接关系支持的无权拓扑；不含距离或坐标。
 # build_zone 和两个方向参考地标作为独立逻辑节点保留，未确认边不虚构。
 TOPOLOGY_NODES = {
     "start_zone": {"kind": "zone", "tag_id": 1},
@@ -377,11 +377,27 @@ TOPOLOGY_EDGES = (
     ("start_t_junction", "gray_corridor"),
     ("gray_corridor", "left_material_t_junction"),
     ("left_material_t_junction", "left_orange_material"),
-    ("gray_corridor", "right_material_t_junction"),
+    ("left_material_t_junction", "right_material_t_junction"),
     ("right_material_t_junction", "roof_material_t_junction"),
     ("roof_material_t_junction", "right_orange_material"),
     ("roof_material_t_junction", "purple_material"),
 )
+
+
+# 图3.8/3.9相对方向，使用 docs/FIELD_DESCRIPTION.md 的项目坐标约定。
+# 这里只记录离散朝向，不用示意图比例推算任何 x/y。键的反向由解析器自动
+# 取相反方向。灰色过道按从西到东的实际路口顺序展开，避免规划路线跳过
+# left_material_t_junction 后把 pending turn 预设到错误的物理路口。
+TOPOLOGY_EDGE_DIRECTIONS = {
+    ("start_zone", "start_t_junction"): "NORTH",
+    ("start_t_junction", "gray_corridor"): "EAST",
+    ("gray_corridor", "left_material_t_junction"): "EAST",
+    ("left_material_t_junction", "left_orange_material"): "NORTH",
+    ("left_material_t_junction", "right_material_t_junction"): "EAST",
+    ("right_material_t_junction", "roof_material_t_junction"): "NORTH",
+    ("roof_material_t_junction", "right_orange_material"): "NORTH",
+    ("roof_material_t_junction", "purple_material"): "WEST",
+}
 
 
 TAG_TOPOLOGY_LOCATIONS = {

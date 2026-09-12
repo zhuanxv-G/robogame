@@ -20,7 +20,7 @@ from hardware.stm32_link import (  # noqa: E402
     Stm32ProtocolError,
     parse_line_navigation_event,
 )
-from tests.test_junction_turn import run_test  # noqa: E402
+from tests.test_junction_turn import prepare_test_plan, run_test  # noqa: E402
 
 
 class FakeSerial:
@@ -123,6 +123,39 @@ class ManualEntrySafetyTests(unittest.TestCase):
         self.assertEqual(calls, 0)
         self.assertTrue(any("Cancelled" in line for line in output))
 
+    def test_route_mode_without_start_never_opens_hardware(self) -> None:
+        calls = 0
+
+        def forbidden_factory() -> Stm32Link:
+            nonlocal calls
+            calls += 1
+            raise AssertionError("hardware factory must not be called")
+
+        args = argparse.Namespace(
+            turn=None,
+            start="start_zone",
+            target="purple_material",
+            heading=None,
+        )
+        plan = prepare_test_plan(args)
+        output: list[str] = []
+
+        result = run_test(
+            args,
+            input_fn=lambda prompt: "",
+            stm32_factory=forbidden_factory,
+            output=output.append,
+        )
+
+        self.assertEqual(plan.next_action.value, "RIGHT")
+        self.assertEqual(result, 2)
+        self.assertEqual(calls, 0)
+        self.assertTrue(
+            any("start_zone -> start_t_junction" in line for line in output)
+        )
+        self.assertIn("RIGHT", output)
+        self.assertIn("purple_material", output)
+
     def test_start_sets_turn_before_line_start_and_cleans_up(self) -> None:
         actions: list[object] = []
 
@@ -174,6 +207,96 @@ class ManualEntrySafetyTests(unittest.TestCase):
                 "close",
             ],
         )
+
+    def test_turn_done_stops_once_and_returns_success(self) -> None:
+        actions: list[object] = []
+
+        class FakeLiveLink:
+            is_connected = False
+
+            def connect(self) -> None:
+                self.is_connected = True
+                actions.append("connect")
+
+            def set_next_turn(self, turn: NextTurn) -> str:
+                actions.append(("next_turn", turn))
+                return f"ACK,NEXT_TURN,{turn.value}"
+
+            def send_command(self, command: str) -> str:
+                actions.append(("send", command))
+                return command
+
+            def wait_ack(self, command: str) -> str:
+                return f"ACK,{command}"
+
+            def readline(self) -> bytes:
+                return b"TURN_DONE,LEFT\r\n"
+
+            def stop(self, **kwargs: object) -> str:
+                actions.append(("stop", kwargs.get("require_ack")))
+                return "ACK,STOP"
+
+            def close(self) -> None:
+                self.is_connected = False
+                actions.append("close")
+
+        result = run_test(
+            argparse.Namespace(turn="LEFT"),
+            input_fn=lambda prompt: "START",
+            stm32_factory=FakeLiveLink,  # type: ignore[arg-type]
+            output=lambda line: None,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(actions.count(("stop", True)), 1)
+        self.assertEqual(actions[-1], "close")
+
+    def test_turn_faults_stop_and_report_fault(self) -> None:
+        for error in (
+            "ERR,TURN_TIMEOUT",
+            "ERR,REACQUIRE_TIMEOUT",
+            "ERR,NO_PENDING_TURN",
+        ):
+            with self.subTest(error=error):
+                actions: list[str] = []
+
+                class FakeLiveLink:
+                    is_connected = False
+
+                    def connect(self) -> None:
+                        self.is_connected = True
+
+                    def set_next_turn(self, turn: NextTurn) -> str:
+                        return f"ACK,NEXT_TURN,{turn.value}"
+
+                    def send_command(self, command: str) -> str:
+                        return command
+
+                    def wait_ack(self, command: str) -> str:
+                        return f"ACK,{command}"
+
+                    def readline(self) -> bytes:
+                        return (error + "\r\n").encode()
+
+                    def stop(self, **kwargs: object) -> None:
+                        actions.append("stop")
+
+                    def close(self) -> None:
+                        self.is_connected = False
+                        actions.append("close")
+
+                output: list[str] = []
+                result = run_test(
+                    argparse.Namespace(turn="LEFT"),
+                    input_fn=lambda prompt: "START",
+                    stm32_factory=FakeLiveLink,  # type: ignore[arg-type]
+                    output=output.append,
+                )
+
+                self.assertEqual(result, 1)
+                self.assertEqual(actions, ["stop", "close"])
+                self.assertTrue(any("FAULT" in line for line in output))
+                self.assertTrue(any(error in line for line in output))
 
 
 if __name__ == "__main__":

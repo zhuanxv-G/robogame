@@ -40,6 +40,7 @@ Logitech C270 ──USB Video───┼──> Raspberry Pi 5
 | 世界模型 | `navigation/field_model.py` | 场地事实、区域能力、Tag 地标和已确认拓扑边 | 左右橙色来源已分离；绝对坐标 TODO |
 | 兼容地图接口 | `navigation/field_map.py`、`tag_map.py` | 保持 `get_zone_by_tag()` 和旧 TAG_MAP 可用 | 已完成 |
 | 拓扑定位/规划 | `navigation/topological_navigation.py` | Tag 到逻辑位置更新、无权图 BFS 路径 | 独立人工入口已完成 Tag 3/4/5 第一轮实机验证；未接入 Runner 或路线执行 |
+| 路线动作适配 | `navigation/route_action_resolver.py` | 用离散边方向把路线中的路口转换为 LEFT/RIGHT/STRAIGHT | 纯软件完成；人工入口只使用首个动作，未接入 Runner |
 | 导航状态接口 | `navigation/navigation_state.py` | LINE_FOLLOW、SEARCH_TAG、TAG_ALIGN、TASK_EXECUTE | 只定义，未运行 |
 | 比赛策略 | `strategy/mission.py` | START 到 BUILD 的任务顺序和元数据 | 只定义，未运行 |
 | 比赛状态 | `competition/mission_state.py` | START、FOLLOW_LINE、GET_ORANGE、GET_PURPLE、BUILD、FINISH、FAULT | 已定义 |
@@ -50,7 +51,7 @@ Logitech C270 ──USB Video───┼──> Raspberry Pi 5
 | 比赛导航控制 | `competition/navigation_controller.py` | 巡线启动、指定 Tag 面积连续确认、STOP 到站和状态观测 | Tag 3/4/5 第一轮实机联调完成；加入 STOPDBG 后的后续测试未再复现早前超时 |
 | 人工导航联调 | `tests/test_navigation_topology_live.py` | 人工 START 后验证巡线、指定 Tag ARRIVED 和拓扑位置更新 | 已取得实机成功结果并增加可选 STOP 时间线；不是 Runner |
 | 巡线传感器采样 | `tests/test_line_sensor_capture.py` | 只读轮询 LINE_STATUS、人工标记并保存 CSV | 工具与 Fake 测试完成；真实 CSV 已作为路口第一版输入 |
-| 路口协议/人工入口 | `hardware/stm32_link.py`、`tests/test_junction_turn.py` | 预设 NEXT_TURN、解析事件、严格 START 后单项实机测试 | 协议和 Fake 测试完成；未接入 Runner，未实车验证 |
+| 路口协议/人工入口 | `hardware/stm32_link.py`、`tests/test_junction_turn.py` | 直接选动作或规划路线后预设首个 NEXT_TURN，严格 START 后单项实机测试 | 协议和 Fake 测试完成；TURN_DONE 后 STOP，未接入 Runner，未实车验证 |
 | 比赛入口 | `competition/main.py` | 初始化上述接口并打印状态 | 安全骨架完成；不连接硬件 |
 | 局部主控 | `main_controller_align.py` | K230D 对准、接近、停车、人工触发搭建 | 第一版联调完成 |
 | 机械动作 | `arm_sequence.py` | 已验证的三组搭建动作 | 已接入局部主控 |
@@ -237,7 +238,7 @@ Pi Stm32Link.set_next_turn(LEFT / RIGHT / STRAIGHT)
 
 候选逻辑只接受 `s1=s2=s3=1`（即 1110/1111），不会把 `0000` 当路口。LEFT/RIGHT 沿已确认坐标分别使用正/负 omega；STRAIGHT 仅以低速前进，不理解场地是否真的有直行出口。没有 pending turn 时立即急停并上报 `ERR,NO_PENDING_TURN`。动作离开宽线和重捕线分别有 1200 ms、2000 ms timeout，超时急停并上报 `ERR,TURN_TIMEOUT` 或 `ERR,REACQUIRE_TIMEOUT`。这些动作速度、时间与连续周期都集中为 LineNav 常量，尚待实车标定。
 
-Pi 只新增协议能力和人工入口，没有把路径节点转换成方向，也没有接入 CompetitionRunner。`tests/test_junction_turn.py --turn ...` 只有在操作者输入严格大写 `START` 后才连接 STM32、预设动作并启动巡线；Ctrl+C 或异常会尝试 STOP 并关闭串口。
+Pi 已在独立纯软件层把 BFS 节点路线转换成路口动作，但没有接入 CompetitionRunner。`tests/test_junction_turn.py` 可直接使用 `--turn ...`，也可使用 `--start ... --target ...` 规划并打印完整 route/actions；路线从路口起步时还要求 `--heading ...`。两种模式都只取第一个动作，只有操作者输入严格大写 `START` 后才连接 STM32、预设动作并启动巡线。`TURN_DONE` 后入口要求 STOP ACK 并退出；timeout、`NO_PENDING_TURN`、Ctrl+C 或其他异常也会进入 FAULT/清理 STOP，不会自动连续运行第二个路口。
 
 ### 3.4 CompetitionRunner 事件调度
 
@@ -356,10 +357,13 @@ MissionState.GET_ORANGE
        │    └─ navigation.field_map（get_zone_by_tag 接口）
        ├─ LINE_MAP
        ├─ TOPOLOGY_NODES / TOPOLOGY_EDGES
+       ├─ TOPOLOGY_EDGE_DIRECTIONS
        └─ TAG_TOPOLOGY_LOCATIONS
              -> TopologicalNavigator
                   ├─ update_from_tag(tag_id)
                   └─ plan_route(start, target) / BFS
+                        -> RouteActionResolver
+                             └─ junction actions: LEFT / RIGHT / STRAIGHT
 ```
 
 - 官方场地尺寸、区域尺寸、Tag 尺寸和巡线拓扑已录入。
@@ -383,13 +387,16 @@ START_ZONE
 
 LEFT_ORANGE_MATERIAL
   -> LEFT_MATERIAL_T_JUNCTION
-  -> GRAY_CORRIDOR
   -> RIGHT_MATERIAL_T_JUNCTION
   -> ROOF_MATERIAL_T_JUNCTION
   -> PURPLE_MATERIAL (Tag 3)
 ```
 
-这里的节点序列没有距离、坐标、朝向、路口出口编号或底盘命令。未来应由上层路线执行器逐段调度 NavigationController，并把路口检测/转向委托给经实机验证的 STM32 实时执行接口；TopologicalNavigator 本身不得发送 `LINE_START`、VEL 或 STOP。
+灰色过道已按从西到东实际经过的路口顺序展开为 `START_T_JUNCTION -> GRAY_CORRIDOR -> LEFT_MATERIAL_T_JUNCTION -> RIGHT_MATERIAL_T_JUNCTION`，避免 BFS 从共享 corridor 节点直接跳过一个真实 T 路口。节点和边仍没有距离或 x/y。
+
+`TOPOLOGY_EDGE_DIRECTIONS` 只保存图 3.8/3.9 和项目坐标约定支持的离散方向：三段灰廊连接向东；启动线、两侧材料竖线向北；屋顶线从屋顶 T 至紫色材料区向西。解析器自动得到反向边。`RouteActionResolver` 比较入边与出边方向，只在 `kind=junction` 节点生成动作：同向为 `STRAIGHT`，逆时针 90° 为 `LEFT`，顺时针 90° 为 `RIGHT`。缺失元数据、非路口转向和 180° 掉头均抛出 `RouteActionUnknownError`，绝不默认直行。路线若从路口开始，必须额外传入当前 heading；否则第一条边没有可靠的入向。
+
+这层只进行纯数据转换，不导入 STM32、相机或任务状态。TopologicalNavigator 仍只负责路线节点；STM32 仍只检测路口并执行已经预设的 pending turn。未来应由上层路线执行器逐路口调度；当前人工入口只取动作序列的第一个动作，尚未接入 CompetitionRunner，也不会自动连续通过多个路口。
 
 ## 6. 串口所有权
 
@@ -508,12 +515,13 @@ tests/test_line_to_tag.py    人工确认后启动巡线，Tag 连续达标后 S
 tests/test_navigation_topology_live.py 人工确认后验证巡线、Tag ARRIVED 和拓扑更新；会驱动底盘
 tests/test_navigation_controller_unit.py  Fake STM32/AprilTag 纯软件状态测试
 tests/test_topological_navigation_unit.py 双橙色区域、Tag 定位和 BFS 纯软件测试
+tests/test_route_action_resolver_unit.py 边方向、LEFT/RIGHT/STRAIGHT、未知路线和禁止默认猜测的纯软件测试
 tests/test_topological_navigation_live_unit.py 人工入口取消/错误 Tag/异常清理的纯软件测试
 tests/test_stm32_stop_unit.py STOP ACK 时序、无关行、迟到 ACK 歧义、无 ACK 和 ERR 的 FakeSerial 测试
 tests/test_line_sensor_capture.py 只读 LINE_STATUS、人工标记和 CSV 现场采样；不驱动执行器
 tests/test_line_sensor_capture_unit.py LINE_STATUS 解析、失败状态、唯一命令、CSV/标记纯软件测试
-tests/test_junction_turn.py   严格START后预设并执行一个真实路口动作；会驱动底盘
-tests/test_junction_turn_unit.py NEXT_TURN/事件解析/START门禁的FakeSerial纯软件测试
+tests/test_junction_turn.py   直接动作或start/target路线模式；严格START后只执行一个真实路口动作
+tests/test_junction_turn_unit.py NEXT_TURN/事件解析、路线首动作、START门禁和单路口STOP的FakeSerial纯软件测试
 tests/vel_test.py            会驱动底盘
 tests/motor_cmd_test.py      启动后会依次驱动底盘
 tests/line_test.py           任意文本命令透传并原样显示回复；可安全发送 LINE_STATUS，也可发送会驱动底盘的命令
@@ -521,7 +529,7 @@ tests/servo_test.py          通用命令透传，可能驱动任意执行器
 其他 uart/stm32 脚本        链路诊断，部分使用历史设备路径
 ```
 
-任何硬件测试都必须由人工逐个启动。同一时刻不得运行另一个占用 STM32 串口的程序；运动测试前需清空场地并准备急停。相关纯软件回归可运行 `python -m unittest discover -s tests -p "*topological*" -v`、`python -m unittest discover -s tests -p "test_navigation_controller_unit.py" -v` 和 `python -m unittest discover -s tests -p "test_stm32_stop_unit.py" -v`，不会打开串口或相机。
+任何硬件测试都必须由人工逐个启动。同一时刻不得运行另一个占用 STM32 串口的程序；运动测试前需清空场地并准备急停。相关纯软件回归可运行 `python -m unittest tests.test_topological_navigation_unit tests.test_route_action_resolver_unit tests.test_junction_turn_unit -v`，不会打开串口或相机；其他导航和 STOP 单元测试也保持纯软件运行。
 
 ## 10. 已落地骨架与下一步
 
@@ -541,7 +549,8 @@ tests/servo_test.py          通用命令透传，可能驱动任意执行器
 ├── TaskController：已验证机械臂任务适配
 ├── VisualApproachController：K230 目标对准与接近
 ├── NavigationController：巡线启动、Tag 面积连续确认、STOP 到站与观测状态
-└── TopologicalNavigator：Tag 地标定位与无坐标 BFS 路线（尚未接入 Runner）
+├── TopologicalNavigator：Tag 地标定位与无坐标 BFS 路线（尚未接入 Runner）
+└── RouteActionResolver：离散方向到路口动作（人工入口只取第一个动作）
         │
         v
 执行层

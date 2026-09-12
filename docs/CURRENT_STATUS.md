@@ -123,11 +123,12 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 | AprilTagLocalization | 基础接口完成 | 每帧选择面积最大 Tag，输出语义名称和面积启发式 confidence |
 | 比赛世界模型 | 场地事实纠正并结构化 | Tag 2/Tag 4 分别对应左右橙色材料区且都具备 `ORANGE_PICKUP`；搭建区保持独立，绝对坐标仍为 TODO |
 | 拓扑定位与规划 | 第一版纯软件实现完成 | `TopologicalNavigator` 可由已知 Tag 更新逻辑位置，并用 BFS 返回已确认节点路径；不拥有或操作硬件 |
+| 路线动作解析 | 轻量适配完成，待实车 | `RouteActionResolver` 使用离散边方向把 BFS 路线中的真实 T 路口转换为 LEFT/RIGHT/STRAIGHT；缺少方向、非路口转向和掉头均明确失败，不默认 STRAIGHT |
 | 导航/任务状态定义 | 基础接口完成 | `competition.MissionState` 新增 FINISH、FAULT；`MissionController` 只负责显式切换和复位，没有运行时调度策略 |
 | competition 导航控制 | Tag 辅助到站已完成第一轮实机联调 | Tag 3/4/5 均完成“巡线—目标 Tag—STOP ACK—ARRIVED”现场验证；加入 STOPDBG 后的后续测试未再复现早前 Tag 5 超时，timeout 和协议保持不变 |
 | 巡线到拓扑人工联调 | Tag 3/4/5 已有实机成功记录 | `test_navigation_topology_live.py` 只在人工输入 START 后连接一个 Stm32Link 和一个 AprilTagService；ARRIVED 后才把目标 Tag 写入 TopologicalNavigator，并新增可选 `--stop-debug` 事务时间线 |
 | 巡线传感器现场采样 | 只读工具完成，已有真实 CSV | `test_line_sensor_capture.py` 约 10 Hz 发送唯一允许命令 `LINE_STATUS`；多组 T 字路口样本已确认 0110/1110/1111，工具不启动巡线或任何执行器 |
-| 路口协议与人工入口 | 软件完成，待烧录/实车 | `Stm32Link.set_next_turn()`、路口事件解析及 `test_junction_turn.py` 已建立；脚本只有严格输入 `START` 后才连接并发送 `NEXT_TURN`/`LINE_START` |
+| 路口协议与人工入口 | 软件完成，待烧录/实车 | `test_junction_turn.py` 支持直接指定动作，或由 start/target 规划路线并只取首个动作；严格输入 `START` 后才连接，`TURN_DONE` 后 STOP，不会连续跑多个路口 |
 | competition 流程调度 | 第一版模拟流程完成 | `CompetitionRunner` 通过外部事件串联巡线、橙色目标接近、抓取、搭建和结束；默认 simulation mode 不调用硬件控制器 |
 | 机械臂任务控制 | 骨架完成，橙色抓取待确认 | `TaskController.build()` 复用 `ArmSequence.run_all()`，`reset_arm()` 复用 `safe_home()`；静态考古发现一个禁用的旧抓取候选，但不足以确认其颜色、存放目标和当前实机有效性 |
 | 比赛入口 | 安全模拟入口完成 | `python -m competition.main` 初始化 CompetitionRunner，默认只打印 simulation/START 及子控制器状态，不连接或运行任何硬件 |
@@ -221,6 +222,15 @@ delay 500 ms
 - 图中已表达启动区、灰色过道、左右材料路口、屋顶材料路口和三个材料区。Tag 5/6 保留为方向参考地标；搭建区因连线未确认而保持独立节点。
 - Tag 2 和 Tag 4 所在的两侧墙体建筑材料区域都支持 `ORANGE_PICKUP`。策略层通过 `PREFERRED_ORANGE_SOURCE` 单独指定 Tag 2 一侧为第一版首选，Tag 4 一侧为备用，不把策略优先级写成场地事实。
 - 该模块不导入 Stm32Link、AprilTagService 或 K230D，不发送 `LINE_START`、VEL、STOP，也不执行路口动作。独立人工入口会在 NavigationController 到达目标 Tag 后显式调用 `update_from_tag(tag_id)`；CompetitionRunner 尚未接入这条链路。
+
+当前 RouteActionResolver 的真实能力边界：
+
+- `TopologicalNavigator.plan_route()` 只负责返回节点序列；`RouteActionResolver` 只读取 `field_model` 的节点类型和离散边方向，把相邻边的朝向变化转换为 `LEFT`、`RIGHT`、`STRAIGHT`。
+- 动作只在 `kind=junction` 的节点生成。`gray_corridor` 等非路口节点可以传递朝向，但不会占用一个 STM32 pending turn。
+- 当前图示方向元数据为：启动区至启动 T、左右材料竖线为 `NORTH`；启动 T 至灰廊、灰廊至左材料 T、左材料 T 至右材料 T 为 `EAST`；右材料 T 至屋顶 T 及屋顶 T 至右橙色区为 `NORTH`；屋顶 T 至紫色区为 `WEST`。反向边由解析器取相反方向。这些只是项目坐标系中的离散关系，没有新增未经测量的 x/y。
+- 若路线从一个 T 路口开始，调用方必须提供当前 `NORTH/SOUTH/EAST/WEST` heading；否则第一动作无法可靠判断并抛出 `RouteActionUnknownError`。缺少方向、非相邻节点、非路口处改变方向或 180° 掉头同样明确失败，不会默认选择 `STRAIGHT`。
+- `build_zone`、`right_corridor_reference`、`bottom_direction_reference` 仍没有已确认拓扑边，因此不能规划或解析到这些节点。己方半场镜像和现场朝向仍需人工确认，未由示意图像素推算坐标。
+- 该解析器不导入硬件层、不保存比赛任务状态，也不发送串口。它和尚未接入 CompetitionRunner 的人工测试入口之间只有纯数据调用。
 
 当前 CompetitionRunner 的真实能力边界：
 
@@ -333,7 +343,17 @@ python3 tests/test_line_sensor_capture.py
 python3 tests/test_junction_turn.py --turn LEFT
 ```
 
-`RIGHT` 同理；`STRAIGHT` 只有在人工确认路口存在真实直行出口时才允许测试。脚本先打印动作和安全提示，只有输入严格大写 `START` 后才构造/连接 `Stm32Link`，依次等待 `ACK,NEXT_TURN,<turn>` 与 `ACK,LINE_START`，随后打印 `JUNCTION_DETECTED`、`TURN_STARTED,...`、`TURN_DONE,...` 和相关错误。Ctrl+C、异常和 fault 均尝试 STOP 并关闭串口；脚本不会被自动运行，也没有接入 CompetitionRunner。
+也可以先做 BFS，并从完整动作序列中只选择第一个动作：
+
+```bash
+python3 tests/test_junction_turn.py \
+  --start start_zone \
+  --target purple_material
+```
+
+若 `--start` 自身就是 T 路口，还必须用 `--heading NORTH|SOUTH|EAST|WEST` 给出机器人当前朝向，解析器不会猜测。脚本在确认前打印完整 `route`、`actions`、`next_action` 和 `target`；它只把 `next_action` 写入一次 `NEXT_TURN`。`RIGHT` 与 `STRAIGHT` 仍可直接指定，且 `STRAIGHT` 只有在人工确认路口存在真实直行出口时才允许测试。
+
+只有输入严格大写 `START` 后，脚本才构造/连接 `Stm32Link`，依次等待 `ACK,NEXT_TURN,<turn>` 与 `ACK,LINE_START`，随后打印 `JUNCTION_DETECTED`、`TURN_STARTED,...`、`TURN_DONE,...`。收到 `TURN_DONE` 后立即要求 STOP ACK 并退出，不会自动预设或通过第二个路口。`ERR,TURN_TIMEOUT`、`ERR,REACQUIRE_TIMEOUT`、`ERR,NO_PENDING_TURN` 和其他协议异常都会打印 `FAULT`，并在清理路径尝试 STOP。Ctrl+C 同样 STOP 并关闭串口。该入口不会被自动运行，路线动作适配尚未接入 CompetitionRunner。
 
 ### 6.5 STM32 入口
 
@@ -402,7 +422,7 @@ Pi 工作区和 Git 历史中没有 `docs/STM32_PROJECT_MAP.md` 和 `docs/STM32_
 1. 烧录前人工复核 `NEXT_TURN`、路口候选、转向符号、所有速度和 timeout；保留当前固件以便回退。
 2. 架空轮或安全支撑下只验证 `NEXT_TURN` 不会立即运动、非法参数返回 ERR、STOP 清除预设；然后在低风险场地逐项验证 LEFT、RIGHT，最后仅在确有直行出口处验证 STRAIGHT。
 3. 每项记录 `JUNCTION_DETECTED -> TURN_STARTED -> TURN_DONE`、四路原始值和实际耗时；重点标定连续确认/re-arm 周期、最低动作时间、低速/omega 和两级 timeout。
-4. 路口单项稳定后，再由协议适配层把事件映射到 NavigationController/Runner；不要把 TopologicalNavigator BFS 直接接到底盘动作。
+4. 路口单项稳定后，再把已完成的 RouteActionResolver 和协议事件接入 NavigationController/Runner；当前仍只由人工入口取路线的第一个动作，不能自动连续通过多个路口。
 5. 继续单独处理普通 LINE_FOLLOW 下的持续 `0000` 风险，并现场测量 Tag、T 字路口和停车点；本轮未改变 AprilTag 或坐标 TODO。
 6. 为 CompetitionRunner 设计独立、显式的 live 生命周期；在安全审查前保持 `competition/main.py` 默认 simulation mode。
 

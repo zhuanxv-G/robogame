@@ -139,7 +139,6 @@ class TopologicalNavigationTests(unittest.TestCase):
             [
                 TopologicalLocation.LEFT_ORANGE_MATERIAL,
                 TopologicalLocation.LEFT_MATERIAL_T_JUNCTION,
-                TopologicalLocation.GRAY_CORRIDOR,
                 TopologicalLocation.RIGHT_MATERIAL_T_JUNCTION,
                 TopologicalLocation.ROOF_MATERIAL_T_JUNCTION,
                 TopologicalLocation.PURPLE_MATERIAL,
