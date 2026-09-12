@@ -1,6 +1,6 @@
 # RoboGame 当前状态
 
-> 状态快照：2026-09-11
+> 状态快照：2026-09-12
 > 分析基准：本地 `main` 分支及当前工作区。
 > 本文区分“代码可确认”“项目记录为已实机验证”和“尚待确认”，避免把历史脚本或规划接口误认为现役功能。
 
@@ -36,6 +36,7 @@ robogame/
 │   └── main.py                    # 不连接硬件的未来比赛入口骨架
 ├── navigation/
 │   ├── localization.py            # AprilTag 轻量定位结果
+│   ├── topological_navigation.py  # 无硬件拓扑定位与 BFS 路线规划
 │   ├── field_model.py             # 规则手册结构化世界模型
 │   ├── field_map.py               # get_zone_by_tag() 兼容查询接口
 │   ├── tag_map.py                 # AprilTag 旧接口兼容视图
@@ -76,6 +77,7 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 - 从 USB Camera 获取图像并检测 tag36h11 AprilTag。
 - 根据 `error_x`、目标面积等信息进行轻量对准和接近判断。
 - 保存比赛场地区域、Tag 和巡线拓扑世界模型。
+- 根据已确认 Tag 更新逻辑位置，并在无坐标拓扑图上规划节点路径。
 - 保存比赛任务顺序及未来状态机接口。
 - 通过 `CompetitionRunner` 串联任务、导航、视觉接近和机械臂控制器。
 - 通过 `NavigationController` 统一记录巡线、材料区目标和 Tag 辅助定位状态。
@@ -119,7 +121,8 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 | AprilTag 检测 | 单项现场验证完成 | 场地可稳定输出正确 id、error_x 和像素面积，最远约 2.7 m 可检测；无 GUI，适合 SSH |
 | AprilTag 服务层 | 接口完成 | `AprilTagService` 延迟创建原 `AprilTagDetector`，没有修改已现场验证的检测算法和参数 |
 | AprilTagLocalization | 基础接口完成 | 每帧选择面积最大 Tag，输出语义名称和面积启发式 confidence |
-| 比赛世界模型 | 结构已建立，坐标未标定 | 官方尺寸和拓扑已结构化；绝对区域、Tag、路口坐标仍为 TODO |
+| 比赛世界模型 | 场地事实纠正并结构化 | Tag 2/Tag 4 分别对应左右橙色材料区且都具备 `ORANGE_PICKUP`；搭建区保持独立，绝对坐标仍为 TODO |
+| 拓扑定位与规划 | 第一版纯软件实现完成 | `TopologicalNavigator` 可由已知 Tag 更新逻辑位置，并用 BFS 返回已确认节点路径；不拥有或操作硬件 |
 | 导航/任务状态定义 | 基础接口完成 | `competition.MissionState` 新增 FINISH、FAULT；`MissionController` 只负责显式切换和复位，没有运行时调度策略 |
 | competition 导航控制 | Tag 辅助到站软件实现完成，待实机联调 | `start_line_to_tag()` 启动 STM32 巡线，`update()` 按目标 Tag 面积连续帧确认并在 STOP ACK 后进入 ARRIVED；阈值由入口传入，尚待现场标定 |
 | competition 流程调度 | 第一版模拟流程完成 | `CompetitionRunner` 通过外部事件串联巡线、橙色目标接近、抓取、搭建和结束；默认 simulation mode 不调用硬件控制器 |
@@ -208,6 +211,14 @@ delay 500 ms
 - `align_with_tag()` 只调用 AprilTagService 读取一帧并记录指定 Tag 是否可见；`TAG_ALIGN` 目前不代表已经执行姿态修正。
 - `handle_event()` 返回 `NotImplemented`，没有假设 `LINE_DONE`、`TAG_REACHED` 或其他尚未验证的 STM32 事件。
 
+当前 TopologicalNavigator 的真实能力边界：
+
+- `update_from_tag()` 把 Tag 2、3、4 分别映射为 `LEFT_ORANGE_MATERIAL`、`PURPLE_MATERIAL`、`RIGHT_ORANGE_MATERIAL`；未知 Tag 返回 `None`，不会覆盖最近一次已确认位置。
+- `plan_route(start, target)` 只在无权、无坐标图上执行 BFS，返回逻辑节点列表；规划本身不会改变 `current_location`。
+- 图中已表达启动区、灰色过道、左右材料路口、屋顶材料路口和三个材料区。Tag 5/6 保留为方向参考地标；搭建区因连线未确认而保持独立节点。
+- Tag 2 和 Tag 4 所在的两侧墙体建筑材料区域都支持 `ORANGE_PICKUP`。策略层通过 `PREFERRED_ORANGE_SOURCE` 单独指定 Tag 2 一侧为第一版首选，Tag 4 一侧为备用，不把策略优先级写成场地事实。
+- 该模块不导入 Stm32Link、AprilTagService 或 K230D，不发送 `LINE_START`、VEL、STOP，也不执行路口动作。NavigationController 到达目标 Tag 后，需要由未来上层显式调用 `update_from_tag(tag_id)`。
+
 当前 CompetitionRunner 的真实能力边界：
 
 - Runner 内部阶段为 `START -> FOLLOW_LINE -> GET_ORANGE -> VISUAL_APPROACH -> GRAB_ORANGE -> BUILD -> FINISH`，任意阶段可接收 `FAULT`；其中视觉接近和抓取是 GET_ORANGE 顶层任务内的细分阶段。
@@ -284,14 +295,14 @@ STM32 不在本 Git 仓库中。当前外部源码入口为 `D:\Code\V1.3_vision
 
 `tests/` 主要是一组人工硬件诊断脚本。多数旧脚本在导入或启动时立即打开串口，其中 `motor_cmd_test.py` 会直接让底盘运动；不能批量运行，也不能在主控制器占用同一串口时运行。
 
-AprilTag 两个旧脚本同样是相机人工测试，不包含断言。新增 `test_line_to_tag.py` 是带人工启动确认的实机入口，不能由自动测试调用；`test_navigation_controller_unit.py` 使用 Fake 服务覆盖到站状态逻辑且不连接硬件。仓库仍没有持续集成配置或统一回归清单。
+AprilTag 两个旧脚本同样是相机人工测试，不包含断言。`test_line_to_tag.py` 是带人工启动确认的实机入口，不能由自动测试调用；`test_navigation_controller_unit.py` 使用 Fake 服务覆盖到站状态逻辑，`test_topological_navigation_unit.py` 覆盖双橙色区域语义、Tag 定位、策略首选、BFS 和无路径失败，二者都不连接硬件。仓库仍没有持续集成配置或统一回归清单。
 
 ## 8. 当前未完成任务和已知缺口
 
 1. `CompetitionRunner` 已定义第一版事件顺序，但 `LINE_DONE`、`TARGET_READY`、`ARM_DONE`、`BUILD_DONE` 目前均没有真实生产者，只能由测试或未来适配层注入。
 2. `competition/main.py` 固定使用 simulation mode，尚未实现显式连接、握手、运行循环、统一退出 STOP 和资源关闭；当前可运动的联调入口仍是 `main_controller_align.py`。
 3. 当前 STM32 直线巡线已现场可用，但仍没有 LINE_DONE 或路口事件；Pi 新增的 `ARRIVED` 仅由指定 AprilTag 面积连续达标并成功 STOP 产生，尚未接入 CompetitionRunner。
-4. 世界模型缺少六个 Tag 中心 `(x, y, yaw)`、黑线节点/线段长度和关键停车点实测值。
+4. 世界模型已有无坐标逻辑图，但仍缺少六个 Tag 中心 `(x, y, yaw)`、黑线节点/线段长度和关键停车点实测值；当前不能生成距离、转向或底盘动作。
 5. AprilTag 目前只有像素误差和像素面积，没有相机内参、畸变校正或姿态估计；到站控制器只增加连续帧确认，`arrival_area` 仍需按实际停车距离标定。
 6. K230D 的橙色、紫色检测结果如何触发取料尚未定义；TaskController 已有接口，但现有 ArmSequence 没有经过确认的独立橙色/紫色抓取动作。STM32 `Test_All()` 中虽有一个禁用的“±3000/±5000 + 底盘移动”旧候选，但缺少颜色/存放语义、调用证据、起始高度和实机版本确认，不能直接采用。
 7. 新增链路层已引用 `config.py`；旧主控和部分诊断脚本仍复制路径或使用 `/dev/ttyUSB*` 等易漂移路径。
@@ -299,7 +310,7 @@ AprilTag 两个旧脚本同样是相机人工测试，不包含断言。新增 `
 9. `main_controller_align.py` 在模块顶层打开串口，且主 `try/finally` 在串口打开和启动等待之后才开始；它不适合被其他模块 import。
 10. 当前主控启动时没有执行 `HELLO_STM32,1` 版本握手；独立机械臂入口会执行。
 11. Pi 仓库不包含 STM32 源码；外部工程 `D:\Code\V1.3_vision\V1.3` 已完成本次巡线诊断修改和本地编译，但该目录没有可用 Git 历史，也没有与当前烧录固件/实机测试记录的版本对应关系。
-12. `strategy/mission.py` 的旧任务元数据尚未迁移到新的 `competition.MissionState`，两层接口暂时并存。
+12. `strategy/mission.py` 已明确第一版首选 Tag 2 / 左侧橙色材料区，但这套旧任务元数据尚未迁移到新的 `competition.MissionState`，两层接口暂时并存。
 
 ## 9. 现有文档评估
 
@@ -321,11 +332,11 @@ Pi 工作区和 Git 历史中没有 `docs/STM32_PROJECT_MAP.md` 和 `docs/STM32_
 建议按以下顺序推进，每一步先做无运动模拟，再做单项实机验证：
 
 1. 在安全空旷场地单独运行 `test_line_to_tag.py`，从保守、可提前停车的 `arrival_area` 开始，校准实际停车距离并回归目标错失、偶发丢帧、正常 ARRIVED 和 Ctrl+C STOP。
-2. 单独设计四路全白安全停车和 T 字路口策略；本轮不修改 STM32 控制逻辑，也不把这两个问题混入 Tag 到站测试。
+2. 在上层路线执行器中把 TopologicalNavigator 的相邻节点对转换为“巡线至路口/地标、选择出口”的动作；真正的 T 字路口检测和转向仍应由 STM32 实时执行层实现并先单独验证，本轮没有实现。
 3. 为 CompetitionRunner 设计独立、显式的 live 启动入口，补齐连接、握手、循环、STOP 确认和异常关闭生命周期；在完成安全审查前保持 `competition/main.py` 默认 simulation mode。
 4. STM32 端事件经实机确认后，再由协议适配层把它们映射为 Runner 事件；不要直接把尚未验证的字符串加入 Stm32Link 或 NavigationController。
 5. 现场测量 Tag、T 字路口和停车点，填写 `field_model.py` 中的 TODO；固定相机后再继续标定面积和误差阈值。
 6. 给 K230D 解析、任务转移和协议格式继续增加不连接硬件的单元测试及串口 mock。
 7. 统一配置与依赖记录，但迁移时保持已验证设备路径、速度、Servo 角度、Stepper 步数和延时原值不变。
 
-当前最准确的完成度描述是：STM32 直线巡线和 AprilTag 单项检测已经现场可用，Pi 已完成“STM32 巡线 + 指定 Tag 面积连续确认 + STOP 到站”的第一版软件闭环及 Fake 回归；该闭环尚未实车联调，`arrival_area` 尚未定标，全白安全、T 字路口、真实 Runner 接入、自动路线、Tag 姿态修正和完整比赛流程仍未完成。
+当前最准确的完成度描述是：STM32 直线巡线和 AprilTag 单项检测已经现场可用，Pi 已完成 Tag 辅助停车的软件闭环，以及区分场地事实与策略的无坐标拓扑定位/BFS 规划；Tag 2、Tag 4 两侧橙色来源已正确建模，第一版仍首选 Tag 2。新拓扑尚未接入真实 Runner 或运动执行，`arrival_area`、全白安全、T 字路口、搭建区连线、Tag 姿态修正和完整比赛流程仍未完成。

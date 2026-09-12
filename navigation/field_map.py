@@ -15,11 +15,16 @@ class ZoneInfo(TypedDict):
 
     name: str
     task: str
+    capabilities: tuple[str, ...]
 
 
 # 区域名称和任务从统一世界模型派生，保持旧查询接口不变。
 TAG_ZONES: dict[int, ZoneInfo] = {
-    tag_id: {"name": str(tag_info["name"]), "task": str(tag_info["task"])}
+    tag_id: {
+        "name": str(tag_info["name"]),
+        "task": str(tag_info["task"]),
+        "capabilities": tuple(tag_info["capabilities"]),
+    }
     for tag_id, tag_info in WORLD_TAG_MAP.items()
 }
 

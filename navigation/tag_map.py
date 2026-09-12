@@ -7,7 +7,11 @@ from .field_model import TAG_MAP as WORLD_TAG_MAP
 TAG_MAP = {
     tag_id: {
         "name": tag_info["name"],
+        "zone": tag_info["zone"],
         "purpose": tag_info["purpose"],
+        "task": tag_info["task"],
+        "capabilities": tag_info["capabilities"],
+        "topological_location": tag_info["topological_location"],
         "x": tag_info["x"],
         "y": tag_info["y"],
         "yaw": tag_info["yaw"],

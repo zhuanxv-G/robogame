@@ -3,6 +3,8 @@
 from enum import Enum
 from typing import TypedDict
 
+from navigation.topological_navigation import TopologicalLocation
+
 
 class MissionState(str, Enum):
     """比赛任务状态。"""
@@ -24,6 +26,15 @@ MISSION_FLOW = (
 )
 
 
+# 场地模型声明左右两处都能取橙色；这里只声明第一版策略顺序。
+ORANGE_SOURCE_PRIORITY = (
+    TopologicalLocation.LEFT_ORANGE_MATERIAL,
+    TopologicalLocation.RIGHT_ORANGE_MATERIAL,
+)
+PREFERRED_ORANGE_SOURCE = ORANGE_SOURCE_PRIORITY[0]
+PREFERRED_ORANGE_TAG_ID = 2
+
+
 class MissionInfo(TypedDict):
     """每个任务关联的目标区域、标签和视觉能力。"""
 
@@ -40,13 +51,13 @@ MISSION_PLAN: dict[MissionState, MissionInfo] = {
         "vision": "AprilTag startup localization",
     },
     MissionState.FOLLOW_LINE: {
-        "target_zone": "orange_material",
-        "target_tag": 2,
+        "target_zone": PREFERRED_ORANGE_SOURCE.value,
+        "target_tag": PREFERRED_ORANGE_TAG_ID,
         "vision": "line following and AprilTag search",
     },
     MissionState.GET_ORANGE: {
-        "target_zone": "orange_material",
-        "target_tag": 2,
+        "target_zone": PREFERRED_ORANGE_SOURCE.value,
+        "target_tag": PREFERRED_ORANGE_TAG_ID,
         "vision": "K230D orange detection",
     },
     MissionState.GET_PURPLE: {
@@ -56,7 +67,7 @@ MISSION_PLAN: dict[MissionState, MissionInfo] = {
     },
     MissionState.BUILD: {
         "target_zone": "build_zone",
-        "target_tag": 4,
-        "vision": "AprilTag alignment",
+        "target_tag": None,
+        "vision": "TODO: build-zone landmark/alignment not confirmed",
     },
 }

@@ -1,6 +1,12 @@
 """依据 RoboGame2026 竞技组规则手册 3.0 建立的场地世界模型。"""
 
 
+# 区域能力描述物理上可执行的任务，不代表当前比赛策略一定选择该区域。
+ORANGE_PICKUP = "ORANGE_PICKUP"
+PURPLE_PICKUP = "PURPLE_PICKUP"
+LANDMARK_LOCALIZATION = "LANDMARK_LOCALIZATION"
+
+
 # 数值单位为厘米，角度单位为度。坐标原点和方向是本项目约定，规则未定义坐标系。
 FIELD_INFO = {
     "width_cm": 720.0,
@@ -86,6 +92,7 @@ ZONE_MAP = {
         "height_status": "TODO: material-zone surface height is not stated separately",
         "task": "collect_orange",
         "purpose": "放置橙色墙体建筑方块",
+        "capabilities": (ORANGE_PICKUP,),
         "slot": {
             "length_cm": 150.0,
             "width_cm": 11.0,
@@ -102,6 +109,26 @@ ZONE_MAP = {
         "minimum_initial_block_spacing_cm": 5.0,
         "source": "rules_3.1.6",
     },
+    # 下列两项把规则中的两侧墙体材料区表示为独立逻辑位置。
+    # 它们共享上面的物理尺寸事实，但不携带策略优先级。
+    "left_orange_material": {
+        "position": _unknown_position("左侧墙体建筑材料区，Tag 2 所在端点"),
+        "physical_zone": "orange_material",
+        "task": "collect_orange",
+        "purpose": "左侧橙色方块取料区域",
+        "capabilities": (ORANGE_PICKUP,),
+        "landmark_tag_id": 2,
+        "source": "figure_3.6_3.9_and_confirmed_field_semantics",
+    },
+    "right_orange_material": {
+        "position": _unknown_position("右侧墙体建筑材料区，Tag 4 所在端点"),
+        "physical_zone": "orange_material",
+        "task": "collect_orange",
+        "purpose": "右侧橙色方块取料区域",
+        "capabilities": (ORANGE_PICKUP,),
+        "landmark_tag_id": 4,
+        "source": "figure_3.6_3.9_and_confirmed_field_semantics",
+    },
     "purple_material": {
         "position": _unknown_position("中央高地区的屋顶建筑材料区，位置见图3.7"),
         "size": {"length_cm": 220.0, "width_cm": 40.0},
@@ -109,6 +136,7 @@ ZONE_MAP = {
         "height_status": "TODO: material-zone surface height is not stated separately",
         "task": "collect_purple",
         "purpose": "放置紫色屋顶建筑方块",
+        "capabilities": (PURPLE_PICKUP,),
         "slot": {
             "count": 3,
             "length_cm": 11.0,
@@ -160,17 +188,21 @@ TAG_MAP = {
         "relative_position": "left_outer_wall_on_gray_corridor_centerline",
         "purpose": "初始化机器人状态",
         "task": "initialize",
+        "capabilities": (LANDMARK_LOCALIZATION,),
+        "topological_location": "start_zone",
         "source": "figure_3.9_location_and_project_semantics",
     },
     2: {
-        "name": "orange_material",
-        "zone": "orange_material",
+        "name": "left_orange_material",
+        "zone": "left_orange_material",
         "x": None,
         "y": None,
         "yaw": None,
         "relative_position": "left_wall_material_centerline_endpoint",
-        "purpose": "橙色材料区定位",
+        "purpose": "左侧橙色材料区定位",
         "task": "collect_orange",
+        "capabilities": (ORANGE_PICKUP, LANDMARK_LOCALIZATION),
+        "topological_location": "left_orange_material",
         "source": "figure_3.9_location_and_project_semantics",
     },
     3: {
@@ -182,17 +214,21 @@ TAG_MAP = {
         "relative_position": "roof_material_centerline_endpoint",
         "purpose": "紫色材料区定位",
         "task": "collect_purple",
+        "capabilities": (PURPLE_PICKUP, LANDMARK_LOCALIZATION),
+        "topological_location": "purple_material",
         "source": "figure_3.9_location_and_project_semantics",
     },
     4: {
-        "name": "build_zone",
-        "zone": "build_zone",
+        "name": "right_orange_material",
+        "zone": "right_orange_material",
         "x": None,
         "y": None,
         "yaw": None,
         "relative_position": "right_wall_material_centerline_endpoint",
-        "purpose": "搭建区对准",
-        "task": "build",
+        "purpose": "右侧橙色材料区定位；其他任务用途待确认",
+        "task": "collect_orange",
+        "capabilities": (ORANGE_PICKUP, LANDMARK_LOCALIZATION),
+        "topological_location": "right_orange_material",
         "source": "figure_3.9_location_and_project_semantics",
     },
     5: {
@@ -204,6 +240,8 @@ TAG_MAP = {
         "relative_position": "right_outer_wall_on_gray_corridor_centerline",
         "purpose": "右侧区域辅助定位",
         "task": "localize",
+        "capabilities": (LANDMARK_LOCALIZATION,),
+        "topological_location": "right_corridor_reference",
         "source": "figure_3.9_location_and_project_semantics",
     },
     6: {
@@ -215,6 +253,8 @@ TAG_MAP = {
         "relative_position": "bottom_outer_wall_on_right_vertical_line_extension",
         "purpose": "底部区域辅助定位",
         "task": "localize",
+        "capabilities": (LANDMARK_LOCALIZATION,),
+        "topological_location": "bottom_direction_reference",
         "source": "figure_3.9_location_and_project_semantics",
     },
 }
@@ -298,7 +338,7 @@ LINE_MAP = {
             "roof_material_centerline",
             "tag_3_endpoint",
         ),
-        "main_corridor_to_build_reference": (
+        "main_corridor_to_right_orange_reference": (
             "gray_corridor_centerline",
             "right_material_t_junction",
             "right_wall_material_centerline",
@@ -307,4 +347,44 @@ LINE_MAP = {
     },
     "coordinate_status": "TODO: measure all segment endpoints and T-junction coordinates",
     "source": "rules_3.1.8_and_figures_3.8_3.9",
+}
+
+
+# 仅包含已由规则图连接关系支持的无权拓扑；不含距离、坐标或转弯动作。
+# build_zone 和两个方向参考地标作为独立逻辑节点保留，未确认边不虚构。
+TOPOLOGY_NODES = {
+    "start_zone": {"kind": "zone", "tag_id": 1},
+    "start_t_junction": {"kind": "junction", "tag_id": None},
+    "gray_corridor": {"kind": "corridor", "tag_id": None},
+    "left_material_t_junction": {"kind": "junction", "tag_id": None},
+    "left_orange_material": {"kind": "zone", "tag_id": 2},
+    "right_material_t_junction": {"kind": "junction", "tag_id": None},
+    "roof_material_t_junction": {"kind": "junction", "tag_id": None},
+    "right_orange_material": {"kind": "zone", "tag_id": 4},
+    "purple_material": {"kind": "zone", "tag_id": 3},
+    "build_zone": {
+        "kind": "zone",
+        "tag_id": None,
+        "route_status": "TODO: confirm line connection and stopping point",
+    },
+    "right_corridor_reference": {"kind": "landmark_reference", "tag_id": 5},
+    "bottom_direction_reference": {"kind": "landmark_reference", "tag_id": 6},
+}
+
+
+TOPOLOGY_EDGES = (
+    ("start_zone", "start_t_junction"),
+    ("start_t_junction", "gray_corridor"),
+    ("gray_corridor", "left_material_t_junction"),
+    ("left_material_t_junction", "left_orange_material"),
+    ("gray_corridor", "right_material_t_junction"),
+    ("right_material_t_junction", "roof_material_t_junction"),
+    ("roof_material_t_junction", "right_orange_material"),
+    ("roof_material_t_junction", "purple_material"),
+)
+
+
+TAG_TOPOLOGY_LOCATIONS = {
+    tag_id: str(tag_info["topological_location"])
+    for tag_id, tag_info in TAG_MAP.items()
 }

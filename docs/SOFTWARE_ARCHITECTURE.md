@@ -1,6 +1,6 @@
 # RoboGame 软件架构
 
-> 架构快照：2026-09-11。本文描述仓库当前实际状态，同时把尚未接入的规划模块明确标出。
+> 架构快照：2026-09-12。本文描述仓库当前实际状态，同时把尚未接入的规划模块明确标出。
 
 ## 1. 系统边界
 
@@ -37,8 +37,9 @@ Logitech C270 ──USB Video───┼──> Raspberry Pi 5
 | AprilTag 服务 | `vision/apriltag_service.py` | 延迟初始化并调用原 AprilTagDetector | 接口完成；算法不变，已供 Tag 辅助到站控制器使用 |
 | AprilTag 视觉 | `vision/apriltag_detector.py` | 采集相机并检测 tag36h11 | 单项现场验证完成，约 2.7 m 仍可检测 |
 | 轻量定位 | `navigation/localization.py` | 选择主 Tag，输出语义、error_x、area、confidence | 模块和人工测试完成 |
-| 世界模型 | `navigation/field_model.py` | 场地、区域、Tag、巡线拓扑 | 已建立；绝对坐标 TODO |
+| 世界模型 | `navigation/field_model.py` | 场地事实、区域能力、Tag 地标和已确认拓扑边 | 左右橙色来源已分离；绝对坐标 TODO |
 | 兼容地图接口 | `navigation/field_map.py`、`tag_map.py` | 保持 `get_zone_by_tag()` 和旧 TAG_MAP 可用 | 已完成 |
+| 拓扑定位/规划 | `navigation/topological_navigation.py` | Tag 到逻辑位置更新、无权图 BFS 路径 | 纯软件完成；未接入 Runner 或运动执行 |
 | 导航状态接口 | `navigation/navigation_state.py` | LINE_FOLLOW、SEARCH_TAG、TAG_ALIGN、TASK_EXECUTE | 只定义，未运行 |
 | 比赛策略 | `strategy/mission.py` | START 到 BUILD 的任务顺序和元数据 | 只定义，未运行 |
 | 比赛状态 | `competition/mission_state.py` | START、FOLLOW_LINE、GET_ORANGE、GET_PURPLE、BUILD、FINISH、FAULT | 已定义 |
@@ -238,6 +239,7 @@ build_sequence.py
 | competition 视觉接近状态 | STOP、ALIGN、APPROACH、READY、FAULT | 可复用的 K230 接近行为；READY 后交回上层 |
 | 旧导航能力枚举 | `navigation/navigation_state.py` 中 LINE_FOLLOW、SEARCH_TAG、TAG_ALIGN、TASK_EXECUTE | 早期行为分类，仍未运行 |
 | competition 导航状态 | IDLE、LINE_FOLLOWING、TAG_SEARCH、TAG_ALIGN、ARRIVED、FAULT | NavigationController 的运行细节；Tag 连续达标并收到 STOP ACK 后可进入 ARRIVED |
+| 拓扑导航状态 | current_location、current_tag、target_location | 只表示已确认地标和规划目标，不表示底盘已经执行路线 |
 | CompetitionRunner 阶段 | START、FOLLOW_LINE、GET_ORANGE、VISUAL_APPROACH、GRAB_ORANGE、BUILD、FINISH、FAULT | 第一版比赛动作编排；完成事件当前只能外部注入 |
 | 旧比赛任务元数据 | `strategy/mission.py` 中 START、FOLLOW_LINE、GET_ORANGE、GET_PURPLE、BUILD | 已有任务计划数据，尚未迁移 |
 | 新比赛任务状态 | `competition/mission_state.py` 中 START、FOLLOW_LINE、GET_ORANGE、GET_PURPLE、BUILD、FINISH、FAULT | 未来比赛入口使用的顶层状态 |
@@ -266,17 +268,44 @@ MissionState.GET_ORANGE
        ├─ FIELD_INFO
        ├─ ZONE_MAP
        ├─ TAG_MAP
-       └─ LINE_MAP
-            ├─ navigation.tag_map（旧字段兼容）
-            └─ navigation.field_map（get_zone_by_tag 接口）
+       │    ├─ navigation.tag_map（旧字段兼容）
+       │    └─ navigation.field_map（get_zone_by_tag 接口）
+       ├─ LINE_MAP
+       ├─ TOPOLOGY_NODES / TOPOLOGY_EDGES
+       └─ TAG_TOPOLOGY_LOCATIONS
+             -> TopologicalNavigator
+                  ├─ update_from_tag(tag_id)
+                  └─ plan_route(start, target) / BFS
 ```
 
 - 官方场地尺寸、区域尺寸、Tag 尺寸和巡线拓扑已录入。
+- `left_orange_material`（Tag 2）和 `right_orange_material`（Tag 4）是两个独立逻辑位置，都声明 `ORANGE_PICKUP`；共享的 `orange_material` 保留规则给出的物理尺寸事实。
+- `build_zone` 与右侧橙色材料区保持分离。其黑线连接和停止点尚未确认，因此目前没有为它虚构拓扑边。
+- `strategy/mission.py` 单独声明 `PREFERRED_ORANGE_SOURCE = LEFT_ORANGE_MATERIAL` 和 Tag 2；Tag 4 仍是可选橙色来源，但第一版流程不主动选择。
 - 软件坐标系由项目约定，不是规则定义。
 - 规则没有标注的 Tag、路口和线段绝对坐标保持 `None`。
 - 不能用规则示意图像素比例伪造厘米坐标。
 
 `from navigation import TAG_MAP` 当前导出的是兼容语义地图；需要完整世界坐标字段时应从 `navigation.field_model` 使用详细 `TAG_MAP`。
+
+TopologicalNavigator 构造时只把上述节点和无向边转换成邻接表，不拥有任何硬件。`update_from_tag(2/3/4)` 分别确认左侧橙色、紫色、右侧橙色逻辑位置；未知 Tag 不改变最近确认的位置。`plan_route()` 用 BFS 返回最少边数的逻辑节点列表，只更新 `target_location`，不会把规划结果伪装成已经移动。当前已确认的典型逻辑路线为：
+
+```text
+START_ZONE
+  -> START_T_JUNCTION
+  -> GRAY_CORRIDOR
+  -> LEFT_MATERIAL_T_JUNCTION
+  -> LEFT_ORANGE_MATERIAL (Tag 2, preferred)
+
+LEFT_ORANGE_MATERIAL
+  -> LEFT_MATERIAL_T_JUNCTION
+  -> GRAY_CORRIDOR
+  -> RIGHT_MATERIAL_T_JUNCTION
+  -> ROOF_MATERIAL_T_JUNCTION
+  -> PURPLE_MATERIAL (Tag 3)
+```
+
+这里的节点序列没有距离、坐标、朝向、路口出口编号或底盘命令。未来应由上层路线执行器逐段调度 NavigationController，并把路口检测/转向委托给经实机验证的 STM32 实时执行接口；TopologicalNavigator 本身不得发送 `LINE_START`、VEL 或 STOP。
 
 ## 6. 串口所有权
 
@@ -326,6 +355,8 @@ competition/main.py（当前 simulation mode，不连接）
 
 NavigationController 同样只持有注入的 Stm32Link/AprilTagService。材料区请求只保存目标；Tag 对准接口仍不生成姿态修正；Tag 辅助到站复用已有 `LINE_START` 和 STOP，只增加 Pi 侧逐帧观测与状态转换。CompetitionRunner 再持有三类控制器和 MissionController，不拥有任何端口或摄像头，本轮也未调用新能力。
 
+TopologicalNavigator 位于 NavigationController 的上层结果消费者位置，但尚未注入 CompetitionRunner：上层只有在 NavigationController 已对指定 Tag 完成 STOP ACK 并进入 ARRIVED 后，才应显式调用 `update_from_tag(tag_id)`。该分层不会增加第二个 STM32 串口或 Camera 所有者。
+
 ## 7. 安全和故障流
 
 当前局部主控已有以下安全路径：
@@ -356,6 +387,7 @@ NavigationController 同样只持有注入的 Stm32Link/AprilTagService。材料
 - NavigationController 仍没有巡线完成/路口协议事件，`handle_event()` 保持未实现；`ARRIVED` 仅是 Pi 的 Tag 面积到站条件，不代表姿态已经对准。
 - 当前 `NavigationController` 尚未封装 `LINE_STATUS` 或消费 `ERR,LINE_SENSOR_IO`；本次只在人工诊断脚本中透传验证，避免在实测前扩展比赛状态机。
 - STM32 四路全白时继续前进是已知风险，T 字路口也尚未处理；二者不由 Pi 的 Tag 到站逻辑掩盖。
+- TopologicalNavigator 只有认知和规划能力；无路径时抛出 `RouteNotFoundError`，不会补一条假直线、估算坐标或触发运动。
 
 ## 8. 配置和依赖
 
@@ -389,6 +421,7 @@ tests/test_apriltag.py       相机人工测试，无机器人运动
 tests/test_localization.py   相机+定位人工测试，无机器人运动
 tests/test_line_to_tag.py    人工确认后启动巡线，Tag 连续达标后 STOP；会驱动底盘
 tests/test_navigation_controller_unit.py  Fake STM32/AprilTag 纯软件状态测试
+tests/test_topological_navigation_unit.py 双橙色区域、Tag 定位和 BFS 纯软件测试
 tests/vel_test.py            会驱动底盘
 tests/motor_cmd_test.py      启动后会依次驱动底盘
 tests/line_test.py           任意文本命令透传并原样显示回复；可安全发送 LINE_STATUS，也可发送会驱动底盘的命令
@@ -396,7 +429,7 @@ tests/servo_test.py          通用命令透传，可能驱动任意执行器
 其他 uart/stm32 脚本        链路诊断，部分使用历史设备路径
 ```
 
-任何硬件测试都必须由人工逐个启动。同一时刻不得运行另一个占用 STM32 串口的程序；运动测试前需清空场地并准备急停。纯软件回归可单独运行 `python -m unittest discover -s tests -p "test_navigation_controller_unit.py" -v`，不会打开串口或相机。
+任何硬件测试都必须由人工逐个启动。同一时刻不得运行另一个占用 STM32 串口的程序；运动测试前需清空场地并准备急停。纯软件回归可单独运行 `python -m unittest discover -s tests -p "test_*_unit.py" -v`，不会打开串口或相机。
 
 ## 10. 已落地骨架与下一步
 
@@ -415,7 +448,8 @@ tests/servo_test.py          通用命令透传，可能驱动任意执行器
 ├── CompetitionRunner：事件顺序与控制器编排
 ├── TaskController：已验证机械臂任务适配
 ├── VisualApproachController：K230 目标对准与接近
-└── NavigationController：巡线启动、Tag 面积连续确认、STOP 到站与观测状态
+├── NavigationController：巡线启动、Tag 面积连续确认、STOP 到站与观测状态
+└── TopologicalNavigator：Tag 地标定位与无坐标 BFS 路线（尚未接入 Runner）
         │
         v
 执行层
@@ -426,6 +460,6 @@ tests/servo_test.py          通用命令透传，可能驱动任意执行器
 STM32 唯一串口链路
 ```
 
-仍未完成的部分包括：标定并实车回归 `arrival_area`、处理全白安全和 T 字路口、把新 ARRIVED 能力接入 Runner、设计 live 硬件生命周期、定义巡线完成/路口事件、实现路线与 Tag 姿态修正、补入 GET_PURPLE、实机确认独立橙色/紫色取料动作、实现 FINISH/FAULT 的完整安全收尾，以及系统化测试。
+仍未完成的部分包括：标定并实车回归 `arrival_area`、处理全白安全、实现并验证 T 字路口实时执行、把 ARRIVED 和拓扑路径接入 Runner、确认搭建区连线、设计 live 硬件生命周期、实现 Tag 姿态修正、补入 GET_PURPLE、实机确认独立橙色/紫色取料动作，以及完整安全收尾和系统化测试。
 
 实现顺序应继续优先保证协议和串口所有权，其次接入状态转换，最后再标定世界坐标和视觉阈值。不要在全自动状态机未可观测、未可安全停车前一次性叠加全部动作。

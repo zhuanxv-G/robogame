@@ -35,6 +35,8 @@
 | 紫色材料区 `purple_material` | 中央高地区的屋顶建筑材料区，见图 3.7 | 220 × 40 cm | 未单列 | 放置紫色屋顶建筑方块 | 绝对位置、表面高度 TODO |
 | 灰色过道 `gray_corridor` | 图 3.8 灰色区域；横线位于其中线 | 未说明 | 未说明 | 连接启动区、材料区和搭建区 | 宽度、边界和高度 TODO |
 
+规则中的墙体建筑材料区在场地两侧各有一处。世界模型在共享的物理类型 `orange_material` 之外，分别使用 `left_orange_material` 和 `right_orange_material` 表示两个逻辑位置：前者以 Tag 2 为地标，后者以 Tag 4 为地标；两者都具备 `ORANGE_PICKUP` 能力。`build_zone` 是独立的物理/逻辑区域，不能与 `right_orange_material` 合并。
+
 ### 3.1 建筑材料与槽位
 
 - 橙色和紫色方块均为 EVA 泡棉，尺寸 10 × 10 × 10 cm，误差 ±5 mm。
@@ -57,9 +59,9 @@
 | Tag | 官方图示相对位置 | 项目所属区域 | 项目用途 | `x/y/yaw` |
 | --- | --- | --- | --- | --- |
 | 1 | 左侧外墙、灰色过道中线延长线处 | `start_zone` | 初始化和起始定位 | TODO |
-| 2 | 左侧墙体材料区中线端点 | `orange_material` | `collect_orange` 定位 | TODO |
+| 2 | 左侧墙体材料区中线端点 | `left_orange_material` | 橙色取料定位；第一版策略首选 | TODO |
 | 3 | 屋顶材料区中线端点 | `purple_material` | `collect_purple` 定位 | TODO |
-| 4 | 右侧墙体材料区中线端点 | `build_zone` | `build_alignment` | TODO |
+| 4 | 右侧墙体材料区中线端点 | `right_orange_material` | 橙色取料定位；第一版策略备用，其他用途待确认 | TODO |
 | 5 | 右侧外墙、灰色过道中线延长线处 | `right_area_reference` | 右侧辅助定位 | TODO |
 | 6 | 底部外墙、右侧竖线延长线处 | `bottom_area_reference` | 底部辅助定位 | TODO |
 
@@ -95,11 +97,11 @@
 
 - `start_zone -> start_centerline -> gray_corridor_centerline`
 - `gray_corridor_centerline -> left_wall_material_centerline -> Tag 2`
-- `gray_corridor_centerline -> right_wall_material_centerline -> Tag 4`
+- `gray_corridor_centerline -> right_wall_material_centerline -> Tag 4`，对应右侧橙色材料逻辑区域
 - `right_wall_material_centerline -> roof_material_centerline -> Tag 3`
 - Tag 1、Tag 5 可用于灰色过道方向校正；Tag 6 可用于右侧竖线延长方向的姿态校正。
 
-规则说明巡线连接搭建区，但图中搭建区入口与线段重叠关系没有尺寸标注。正式规划 `Tag 4 -> build_zone` 的停止点和脱线距离前必须现场测量。
+规则说明巡线连接搭建区，但图中搭建区入口与线段重叠关系没有尺寸标注。Tag 4 只能确认右侧墙体材料区地标，不能据此把该区域等同于搭建区；正式加入 `right_orange_material -> build_zone` 拓扑边、停止点或脱线距离前必须现场测量。
 
 ## 6. 任务关联
 
@@ -116,12 +118,12 @@ START
 | 任务 | 目标区域 | 目标 Tag | 视觉能力 |
 | --- | --- | --- | --- |
 | `START` | `start_zone` | 1 | AprilTag 起始定位 |
-| `FOLLOW_LINE` | `orange_material` | 2 | 巡线并搜索 AprilTag |
-| `GET_ORANGE` | `orange_material` | 2 | K230D orange detection |
+| `FOLLOW_LINE` | `left_orange_material` | 2 | 巡线并搜索 AprilTag |
+| `GET_ORANGE` | `left_orange_material` | 2 | K230D orange detection |
 | `GET_PURPLE` | `purple_material` | 3 | K230D purple detection |
-| `BUILD` | `build_zone` | 4 | AprilTag alignment |
+| `BUILD` | `build_zone` | 待确认 | 搭建区地标/对准方式待确认 |
 
-该顺序和 Tag 任务绑定是当前机器人策略，不是规则强制顺序。规则允许机器人自行选择策略，但要求完全自主运行。
+场地事实与当前策略分层表示：Tag 2、Tag 4 两侧都可以获取橙色方块；第一版策略因为起始路线更近、逻辑更简单，仍优先选择 Tag 2 / `left_orange_material`。Tag 4 / `right_orange_material` 只作为备用来源记录，本轮不实现路线不可用、方块耗尽等动态切换。该任务顺序和首选项不是规则强制顺序。
 
 ## 7. 仍需人工测量或确认
 
