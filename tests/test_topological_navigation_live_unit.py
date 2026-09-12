@@ -79,6 +79,38 @@ class RecordingTopologicalNavigator(TopologicalNavigator):
         return super().update_from_tag(tag_id)
 
 
+class FirstStopTimeoutLink:
+    """Model arrival STOP timeout followed by a successful cleanup STOP."""
+
+    def __init__(self) -> None:
+        self.is_connected = False
+        self.commands: list[str] = []
+        self.stop_labels: list[str] = []
+
+    def connect(self) -> None:
+        self.is_connected = True
+
+    def send_command(self, command: str) -> str:
+        self.commands.append(command)
+        return command
+
+    def stop(
+        self,
+        *,
+        require_ack: bool = False,
+        timeout: float = 2.0,
+        debug_label: str = "stop",
+    ) -> str | None:
+        del require_ack, timeout
+        self.stop_labels.append(debug_label)
+        if len(self.stop_labels) == 1:
+            raise TimeoutError("Timeout waiting for: ACK,STOP")
+        return "ACK,STOP"
+
+    def close(self) -> None:
+        self.is_connected = False
+
+
 def make_args(
     *,
     tag_id: int = 2,
@@ -89,6 +121,7 @@ def make_args(
         tag_id=tag_id,
         arrival_area=arrival_area,
         confirm_frames=confirm_frames,
+        stop_debug=False,
     )
 
 
@@ -96,7 +129,7 @@ class NavigationTopologyLiveTests(unittest.TestCase):
     def test_cancel_does_not_construct_or_connect_hardware(self) -> None:
         output: list[str] = []
 
-        def forbidden_factory() -> Any:
+        def forbidden_factory(*_args: object, **_kwargs: object) -> Any:
             self.fail("hardware owner was constructed before START")
 
         result = run_live_test(
@@ -132,7 +165,7 @@ class NavigationTopologyLiveTests(unittest.TestCase):
             make_args(),
             input_func=lambda _prompt: "START",
             output=output.append,
-            stm32_factory=lambda: Stm32Link(
+            stm32_factory=lambda **_kwargs: Stm32Link(
                 port="fake",
                 serial_factory=lambda *_args, **_kwargs: serial_connection,
             ),
@@ -168,7 +201,7 @@ class NavigationTopologyLiveTests(unittest.TestCase):
             make_args(),
             input_func=lambda _prompt: "START",
             output=output.append,
-            stm32_factory=lambda: Stm32Link(
+            stm32_factory=lambda **_kwargs: Stm32Link(
                 port="fake",
                 serial_factory=lambda *_args, **_kwargs: serial_connection,
             ),
@@ -183,6 +216,38 @@ class NavigationTopologyLiveTests(unittest.TestCase):
         self.assertTrue(any(line.startswith("FAULT:") for line in output))
         self.assertTrue(detector.released)
         self.assertTrue(serial_connection.closed)
+
+    def test_arrival_stop_timeout_sends_one_cleanup_stop(self) -> None:
+        stm32 = FirstStopTimeoutLink()
+        detector = FakeDetector(
+            [[{"id": 2, "error_x": 0, "area": 5000}]]
+        )
+        navigator = RecordingTopologicalNavigator()
+        output: list[str] = []
+        args = make_args(confirm_frames=1)
+        args.stop_debug = True
+
+        result = run_live_test(
+            args,
+            input_func=lambda _prompt: "START",
+            output=output.append,
+            stm32_factory=lambda **_kwargs: stm32,  # type: ignore[arg-type]
+            apriltag_factory=lambda: AprilTagService(
+                detector_factory=lambda **_kwargs: detector,
+            ),
+            navigator_factory=lambda: navigator,
+            clock=lambda: 0.0,
+        )
+
+        self.assertEqual(result, 1)
+        self.assertEqual(stm32.commands, ["LINE_START"])
+        self.assertEqual(stm32.stop_labels, ["stop", "cleanup"])
+        self.assertEqual(navigator.update_calls, [])
+        self.assertTrue(any(line.startswith("FAULT:") for line in output))
+        self.assertIn("[STOPDBG] cleanup STOP requested", output)
+        self.assertIn("STOP acknowledged by STM32.", output)
+        self.assertTrue(detector.released)
+        self.assertFalse(stm32.is_connected)
 
 
 if __name__ == "__main__":

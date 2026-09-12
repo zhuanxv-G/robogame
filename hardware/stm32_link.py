@@ -48,12 +48,17 @@ class Stm32Link:
         timeout: float = 0.2,
         *,
         serial_factory: SerialFactory | None = None,
+        stop_debug: bool = False,
+        diagnostic_output: Callable[[str], object] | None = None,
     ) -> None:
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
         self._serial_factory = serial_factory
         self._serial: SerialConnection | None = None
+        self._stop_debug = stop_debug
+        self._diagnostic_output = diagnostic_output or print
+        self._stop_request_count = 0
 
     @property
     def is_connected(self) -> bool:
@@ -149,23 +154,78 @@ class Stm32Link:
         """Read one response line for the existing ArmSequence interface."""
         return self._require_connection().readline()
 
-    def _wait_for(self, expected_prefix: str, timeout: float) -> str:
+    def _wait_for(
+        self,
+        expected_prefix: str,
+        timeout: float,
+        *,
+        stop_debug_context: tuple[int, str, int] | None = None,
+    ) -> str:
         """Wait for a response prefix and fail immediately on STM32 ERR."""
         serial_connection = self._require_connection()
-        deadline = time.monotonic() + timeout
+        wait_started_ns = time.monotonic_ns()
+        deadline_ns = wait_started_ns + int(timeout * 1_000_000_000)
 
-        while time.monotonic() < deadline:
-            line = serial_connection.readline().decode(
-                errors="ignore"
-            ).strip()
+        while time.monotonic_ns() < deadline_ns:
+            raw_line = serial_connection.readline()
+            if stop_debug_context is not None and raw_line:
+                self._emit_stop_debug(
+                    stop_debug_context,
+                    f"RX {raw_line!r}",
+                )
+            line = raw_line.decode(errors="ignore").strip()
             if not line:
                 continue
             if line.startswith("ERR,"):
                 raise Stm32ProtocolError(f"STM32 error: {line}")
             if line.startswith(expected_prefix):
+                if stop_debug_context is not None:
+                    self._emit_stop_debug(
+                        stop_debug_context,
+                        f"matched {expected_prefix}",
+                    )
                 return line
 
+        if stop_debug_context is not None:
+            self._emit_stop_debug(
+                stop_debug_context,
+                f"timeout waiting_for={expected_prefix!r}",
+            )
         raise TimeoutError(f"Timeout waiting for: {expected_prefix}")
+
+    def _emit_stop_debug(
+        self,
+        context: tuple[int, str, int],
+        message: str,
+    ) -> None:
+        """Emit best-effort STOP diagnostics without affecting control flow."""
+        if not self._stop_debug:
+            return
+        request_id, phase, request_started_ns = context
+        elapsed_ms = (
+            time.monotonic_ns() - request_started_ns
+        ) / 1_000_000.0
+        try:
+            self._diagnostic_output(
+                f"[STOPDBG] request={request_id} phase={phase} "
+                f"elapsed_ms={elapsed_ms:.1f} {message}"
+            )
+        except Exception:
+            # Diagnostics must never prevent or delay a safety STOP.
+            pass
+
+    @staticmethod
+    def _safe_in_waiting(serial_connection: SerialConnection) -> str:
+        try:
+            value = getattr(serial_connection, "in_waiting")
+        except Exception as exc:
+            return f"unavailable:{type(exc).__name__}"
+        if value is None:
+            return "unavailable"
+        try:
+            return str(int(value))
+        except (TypeError, ValueError):
+            return f"unavailable:{type(value).__name__}"
 
     def wait_ack(self, command: str, timeout: float = 2.0) -> str:
         """Wait for ``ACK,<command>`` using the current prefix semantics."""
@@ -234,11 +294,43 @@ class Stm32Link:
         *,
         require_ack: bool = False,
         timeout: float = 2.0,
+        debug_label: str = "stop",
     ) -> str | None:
         """Send global ``STOP``, optionally requiring its existing ACK."""
-        self.send_command("STOP")
+        serial_connection = self._require_connection()
+        self._stop_request_count += 1
+        request_started_ns = time.monotonic_ns()
+        debug_context = (
+            self._stop_request_count,
+            debug_label,
+            request_started_ns,
+        )
+        if self._stop_debug:
+            in_waiting = self._safe_in_waiting(serial_connection)
+            self._emit_stop_debug(
+                debug_context,
+                f"STOP_REQUEST monotonic_ns={request_started_ns} "
+                f"in_waiting={in_waiting}",
+            )
+
         try:
-            return self.wait_ack("STOP", timeout)
+            self.send_command("STOP")
+        except Exception as exc:
+            self._emit_stop_debug(
+                debug_context,
+                f"STOP_WRITE_FAILED {type(exc).__name__}: {exc}",
+            )
+            raise
+        self._emit_stop_debug(debug_context, "STOP_WRITE_DONE")
+
+        try:
+            return self._wait_for(
+                "ACK,STOP",
+                timeout,
+                stop_debug_context=(
+                    debug_context if self._stop_debug else None
+                ),
+            )
         except Exception:
             if require_ack:
                 raise

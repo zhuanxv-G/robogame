@@ -39,7 +39,7 @@ Logitech C270 ──USB Video───┼──> Raspberry Pi 5
 | 轻量定位 | `navigation/localization.py` | 选择主 Tag，输出语义、error_x、area、confidence | 模块和人工测试完成 |
 | 世界模型 | `navigation/field_model.py` | 场地事实、区域能力、Tag 地标和已确认拓扑边 | 左右橙色来源已分离；绝对坐标 TODO |
 | 兼容地图接口 | `navigation/field_map.py`、`tag_map.py` | 保持 `get_zone_by_tag()` 和旧 TAG_MAP 可用 | 已完成 |
-| 拓扑定位/规划 | `navigation/topological_navigation.py` | Tag 到逻辑位置更新、无权图 BFS 路径 | 纯软件完成；仅由独立人工入口消费 ARRIVED，未接入 Runner 或运动执行 |
+| 拓扑定位/规划 | `navigation/topological_navigation.py` | Tag 到逻辑位置更新、无权图 BFS 路径 | 独立人工入口已完成 Tag 3/4/5 第一轮实机验证；未接入 Runner 或路线执行 |
 | 导航状态接口 | `navigation/navigation_state.py` | LINE_FOLLOW、SEARCH_TAG、TAG_ALIGN、TASK_EXECUTE | 只定义，未运行 |
 | 比赛策略 | `strategy/mission.py` | START 到 BUILD 的任务顺序和元数据 | 只定义，未运行 |
 | 比赛状态 | `competition/mission_state.py` | START、FOLLOW_LINE、GET_ORANGE、GET_PURPLE、BUILD、FINISH、FAULT | 已定义 |
@@ -47,8 +47,8 @@ Logitech C270 ──USB Video───┼──> Raspberry Pi 5
 | 比赛流程调度 | `competition/competition_runner.py` | 通过外部事件编排导航、视觉接近、抓取与搭建 | 第一版模拟流程完成；无真实事件源 |
 | 比赛任务控制 | `competition/task_controller.py` | 把比赛任务接口适配到已有 ArmSequence 动作 | build/reset 已接入；独立取料待确认 |
 | 视觉接近控制 | `competition/visual_approach_controller.py` | K230 对准、前进、READY 和超时停车 | 原逻辑已迁移；未接入比赛循环、未实机回归 |
-| 比赛导航控制 | `competition/navigation_controller.py` | 巡线启动、指定 Tag 面积连续确认、STOP 到站和状态观测 | 第一版软件闭环完成；阈值待标定，未接入 Runner、未实车联调 |
-| 人工导航联调 | `tests/test_navigation_topology_live.py` | 人工 START 后验证巡线、指定 Tag ARRIVED 和拓扑位置更新 | 入口完成、Fake 回归通过；尚未实机运行，不是 Runner |
+| 比赛导航控制 | `competition/navigation_controller.py` | 巡线启动、指定 Tag 面积连续确认、STOP 到站和状态观测 | Tag 3/4/5 第一轮实机联调完成；Tag 5 偶发 STOP ACK timeout 待诊断 |
+| 人工导航联调 | `tests/test_navigation_topology_live.py` | 人工 START 后验证巡线、指定 Tag ARRIVED 和拓扑位置更新 | 已取得实机成功结果并增加可选 STOP 时间线；不是 Runner |
 | 比赛入口 | `competition/main.py` | 初始化上述接口并打印状态 | 安全骨架完成；不连接硬件 |
 | 局部主控 | `main_controller_align.py` | K230D 对准、接近、停车、人工触发搭建 | 第一版联调完成 |
 | 机械动作 | `arm_sequence.py` | 已验证的三组搭建动作 | 已接入局部主控 |
@@ -151,7 +151,37 @@ NavigationController 不拥有串口或摄像头，只使用入口注入的共�
 
 `tests/test_navigation_topology_live.py` 中的观测包装只保存同一次 `AprilTagService.detect()` 已返回的 Tag id，供低频状态打印使用；它不创建第二个 detector、不重复读取相机，也不参与 NavigationController 的目标过滤和 ARRIVED 判定。错误 Tag 可被打印，但只有 NavigationController 最终确认的目标 Tag 能更新拓扑位置。该脚本在 Ctrl+C、异常和 FAULT 退出路径尝试 STOP，并释放 Camera 与 STM32。
 
-该入口必须人工输入严格大写的 `START` 才会连接设备并启动巡线，目前尚未实机运行。它不是 CompetitionRunner，不调用 `plan_route()`，也没有实现 T 字路口检测、出口选择或真实转向。
+该入口必须人工输入严格大写的 `START` 才会连接设备并启动巡线。现场已确认 Tag 4 在 `arrival_area=10000` 时约 80 cm 停车并更新为 `RIGHT_ORANGE_MATERIAL`，Tag 5 使用同一面积阈值时也基本在约 80 cm 停车；Tag 3 使用 `arrival_area=20000`、`confirm_frames=3` 连续三次约 57 cm 停车并更新为 `PURPLE_MATERIAL`。这些现场参数不作为代码默认值。该入口不是 CompetitionRunner，不调用 `plan_route()`，也没有实现 T 字路口检测、出口选择或真实转向。
+
+### 3.3.1 STOP ACK 偶发超时诊断
+
+当前到站 STOP 的 Pi 调用链为：
+
+```text
+NavigationController.update()
+  -> _confirm_arrival()
+  -> Stm32Link.stop(require_ack=True)
+  -> send_command("STOP")
+     -> serial.write(b"STOP\n")
+     -> serial.flush()
+  -> _wait_for("ACK,STOP", timeout=2.0)
+     -> ACK：NavigationState.ARRIVED
+     -> timeout/ERR：NavigationState.FAULT，异常返回 live test
+  -> live test finally
+     -> Stm32Link.stop(require_ack=True, debug_label="cleanup")
+```
+
+`Stm32Link` 构造时的 pyserial `timeout=0.2` 是单次 `readline()` 最长阻塞时间；STOP 的 `timeout=2.0` 是 `_wait_for()` 总体逻辑窗口，从 STOP 的 `write()` 和 `flush()` 完成后开始。循环会在 2 秒内反复 `readline()`；因为截止条件在每次阻塞读取前检查，实际抛出时间理论上可比 2.0 秒多最多一次串口读超时。空行继续等待；非目标非 ERR 行被消费并丢弃；`ERR,...` 立即抛出 `Stm32ProtocolError`；`ACK,STOP` 前缀匹配成功。
+
+人工拓扑入口运行期间只有 NavigationController 经同一个 Stm32Link 同步读取 STM32 回复，没有后台线程、drain 或第二个读取者。仓库中的 `main_controller_align.py`、其他人工测试和 legacy 脚本各有自己的读取循环，但它们只有被错误地并发启动时才会争抢同一物理串口。
+
+到站 STOP 超时在 `_confirm_arrival()` 内已经把 NavigationController 置为 FAULT，因此 `update()` 外层不会再调用 `_enter_fault()` 重发；live test 的 except 只打印错误，finally 再发一次 cleanup STOP。该路径总计两次 STOP，即首次请求加一次额外 cleanup，每次都以 2.0 秒等待 ACK。
+
+现有协议没有请求 ID。第一次 STOP 超时后，其迟到的 `ACK,STOP` 会留在串口输入路径；cleanup 写入第二次 STOP 后，`_wait_for()` 可以把该旧 ACK 当作第二次请求成功。FakeSerial 已稳定复现这种歧义，因此“cleanup STOP 成功”不能单独证明第二次 STOP 获得了自己的 ACK。
+
+`Stm32Link(stop_debug=True)` 现在只增加观测，不改变上述行为或 timeout：STOP 前记录 `time.monotonic_ns()` 和可安全获取的 `serial.in_waiting`，写入/flush 后记录耗时，等待期间记录每条非空 `repr(raw_line)`，最后记录匹配或超时。`test_navigation_topology_live.py --stop-debug` 还会显式标出 cleanup 请求。正常高频视觉循环不会输出 STOPDBG。
+
+外部 STM32 源码提供的静态证据是：完整 STOP 行由 USART1 单字节中断置入独立高优先级邮箱，紧循环主循环首先调用 `RpiUart.Process()`；`Handle_Stop()` 依次停止 Stepper、LineNav 和底盘后，通过 `HAL_UART_Transmit(..., 100)` 发送 `ACK,STOP`，该路径没有显式 delay。值得现场区分的假设包括 UART/USB 回复丢失或异常延迟、STM32 TX 调用失败，以及外部进程误读；其中 STM32 `Send()` 当前忽略 `HAL_UART_Transmit()` 返回值是代码事实，但是否发生过发送失败仍无现场证据。
 
 当前外部 STM32 源码中的巡线执行链为：
 
@@ -389,6 +419,7 @@ TopologicalNavigator 位于 NavigationController 的上层结果消费者位置�
 - `LINE_STATUS` 只读采样，不取得底盘控制权，也不改变 LineNav Active。
 - Tag 辅助到站只在指定 Tag 面积连续达标后停车；单帧或少量漏检只清零确认计数，不会突然 STOP。
 - 到站 STOP 必须收到 ACK 才进入 `ARRIVED`；AprilTagService/Stm32Link 异常会尝试 STOP 并进入 `FAULT`，STOP 失败保持 `FAULT`。
+- Tag 5 偶发出现车辆已停止但首次 STOP ACK 等待超时；当前保持 2.0 s timeout，并通过可选 STOPDBG 区分正常延迟、无关回复、迟到 ACK 歧义和完全无 ACK。根因尚未确认。
 
 仍存在的架构风险：
 
@@ -441,6 +472,7 @@ tests/test_navigation_topology_live.py 人工确认后验证巡线、Tag ARRIVED
 tests/test_navigation_controller_unit.py  Fake STM32/AprilTag 纯软件状态测试
 tests/test_topological_navigation_unit.py 双橙色区域、Tag 定位和 BFS 纯软件测试
 tests/test_topological_navigation_live_unit.py 人工入口取消/错误 Tag/异常清理的纯软件测试
+tests/test_stm32_stop_unit.py STOP ACK 时序、无关行、迟到 ACK 歧义、无 ACK 和 ERR 的 FakeSerial 测试
 tests/vel_test.py            会驱动底盘
 tests/motor_cmd_test.py      启动后会依次驱动底盘
 tests/line_test.py           任意文本命令透传并原样显示回复；可安全发送 LINE_STATUS，也可发送会驱动底盘的命令
@@ -448,7 +480,7 @@ tests/servo_test.py          通用命令透传，可能驱动任意执行器
 其他 uart/stm32 脚本        链路诊断，部分使用历史设备路径
 ```
 
-任何硬件测试都必须由人工逐个启动。同一时刻不得运行另一个占用 STM32 串口的程序；运动测试前需清空场地并准备急停。相关纯软件回归可运行 `python -m unittest discover -s tests -p "*topological*" -v` 和 `python -m unittest discover -s tests -p "test_navigation_controller_unit.py" -v`，不会打开串口或相机。
+任何硬件测试都必须由人工逐个启动。同一时刻不得运行另一个占用 STM32 串口的程序；运动测试前需清空场地并准备急停。相关纯软件回归可运行 `python -m unittest discover -s tests -p "*topological*" -v`、`python -m unittest discover -s tests -p "test_navigation_controller_unit.py" -v` 和 `python -m unittest discover -s tests -p "test_stm32_stop_unit.py" -v`，不会打开串口或相机。
 
 ## 10. 已落地骨架与下一步
 
@@ -479,6 +511,6 @@ tests/servo_test.py          通用命令透传，可能驱动任意执行器
 STM32 唯一串口链路
 ```
 
-仍未完成的部分包括：标定并实车回归 `arrival_area`、处理全白安全、实现并验证 T 字路口实时执行、把 ARRIVED 和拓扑路径接入 Runner、确认搭建区连线、设计 live 硬件生命周期、实现 Tag 姿态修正、补入 GET_PURPLE、实机确认独立橙色/紫色取料动作，以及完整安全收尾和系统化测试。
+仍未完成的部分包括：用 STOPDBG 确认偶发 ACK timeout 根因、处理全白安全、实现并验证 T 字路口实时执行、把 ARRIVED 和拓扑路径接入 Runner、确认搭建区连线、设计 live 硬件生命周期、实现 Tag 姿态修正、补入 GET_PURPLE、实机确认独立橙色/紫色取料动作，以及完整安全收尾和系统化测试。
 
 实现顺序应继续优先保证协议和串口所有权，其次接入状态转换，最后再标定世界坐标和视觉阈值。不要在全自动状态机未可观测、未可安全停车前一次性叠加全部动作。

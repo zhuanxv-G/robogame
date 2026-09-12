@@ -169,6 +169,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=3,
         help="consecutive qualifying frames required (default: %(default)s)",
     )
+    parser.add_argument(
+        "--stop-debug",
+        action="store_true",
+        help="log monotonic STOP write/RX timing without changing timeouts",
+    )
     return parser.parse_args(argv)
 
 
@@ -203,7 +208,7 @@ def run_live_test(
     *,
     input_func: Callable[[str], str] = input,
     output: Callable[[str], object] = print,
-    stm32_factory: Callable[[], Stm32Link] = Stm32Link,
+    stm32_factory: Callable[..., Stm32Link] = Stm32Link,
     apriltag_factory: Callable[[], AprilTagService] = AprilTagService,
     controller_factory: Callable[
         [Stm32Link, ObservedAprilTagInput], NavigationController
@@ -218,6 +223,7 @@ def run_live_test(
     output(f"target_tag={args.tag_id}")
     output(f"arrival_area={args.arrival_area}")
     output(f"confirm_frames={args.confirm_frames}")
+    output(f"stop_debug={int(args.stop_debug)}")
     output("WARNING: START will send LINE_START and move the chassis.")
 
     confirmation = input_func("Type START to continue: ").strip()
@@ -225,7 +231,10 @@ def run_live_test(
         output("Cancelled; no hardware was opened and no command was sent.")
         return 0
 
-    stm32 = stm32_factory()
+    stm32 = stm32_factory(
+        stop_debug=args.stop_debug,
+        diagnostic_output=output,
+    )
     apriltag = apriltag_factory()
     observed_apriltag = ObservedAprilTagInput(apriltag)
     controller = controller_factory(stm32, observed_apriltag)
@@ -273,7 +282,9 @@ def run_live_test(
         arrived = controller.current_state is NavigationState.ARRIVED
         if stm32.is_connected and not arrived:
             try:
-                stm32.stop(require_ack=True)
+                if args.stop_debug:
+                    output("[STOPDBG] cleanup STOP requested")
+                stm32.stop(require_ack=True, debug_label="cleanup")
                 output("STOP acknowledged by STM32.")
             except Exception as exc:
                 output(f"STOP failed: {type(exc).__name__}: {exc}")
