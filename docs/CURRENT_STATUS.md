@@ -124,6 +124,7 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 | 比赛世界模型 | 场地事实纠正并结构化 | Tag 2/Tag 4 分别对应左右橙色材料区且都具备 `ORANGE_PICKUP`；搭建区保持独立，绝对坐标仍为 TODO |
 | 拓扑定位与规划 | 第一版纯软件实现完成 | `TopologicalNavigator` 可由已知 Tag 更新逻辑位置，并用 BFS 返回已确认节点路径；不拥有或操作硬件 |
 | 路线动作解析 | 轻量适配完成，待实车 | `RouteActionResolver` 使用离散边方向把 BFS 路线中的真实 T 路口转换为 LEFT/RIGHT/STRAIGHT；缺少方向、非路口转向和掉头均明确失败，不默认 STRAIGHT |
+| 多路口路线执行 | 软件实现完成，待实车 | `RouteExecutor` 严格按 `JUNCTION_DETECTED -> TURN_STARTED -> TURN_DONE` 推进动作，全部路口完成后复用 NavigationController 做最终 Tag 到站；尚未接入 CompetitionRunner |
 | 导航/任务状态定义 | 基础接口完成 | `competition.MissionState` 新增 FINISH、FAULT；`MissionController` 只负责显式切换和复位，没有运行时调度策略 |
 | competition 导航控制 | Tag 辅助到站已完成第一轮实机联调 | Tag 3/4/5 均完成“巡线—目标 Tag—STOP ACK—ARRIVED”现场验证；加入 STOPDBG 后的后续测试未再复现早前 Tag 5 超时，timeout 和协议保持不变 |
 | 巡线到拓扑人工联调 | Tag 3/4/5 已有实机成功记录 | `test_navigation_topology_live.py` 只在人工输入 START 后连接一个 Stm32Link 和一个 AprilTagService；ARRIVED 后才把目标 Tag 写入 TopologicalNavigator，并新增可选 `--stop-debug` 事务时间线 |
@@ -207,6 +208,7 @@ delay 500 ms
 - 使用独立于 MissionState 的 `IDLE`、`LINE_FOLLOWING`、`TAG_SEARCH`、`TAG_ALIGN`、`ARRIVED`、`FAULT` 状态。
 - `start_line_follow()` 只通过共享 Stm32Link 发送仓库已有的 `LINE_START`；不等待或推断巡线完成。
 - `start_line_to_tag(tag_id, arrival_area, confirm_frames)` 使用同一个 `LINE_START` 启动 STM32 本地巡线；后续每次 `update()` 只读取一帧 AprilTag 结果。
+- `continue_line_to_tag(...)` 只配置相同的 Tag 到站观测，不再次发送 `LINE_START`；它只供已经处于 STM32 LineNav 运行期的 RouteExecutor 在最后一个路口完成后交接使用。
 - 目标未出现、出现错误 Tag、面积低于阈值或中间丢帧时继续巡线，并清零连续确认计数；不会因偶发漏检停车。
 - 只有指定 Tag 的面积连续 `confirm_frames` 帧达到调用方传入的 `arrival_area`，才要求 STM32 确认 STOP，并在成功后进入 `ARRIVED`。该阈值没有内置最终值，仍需现场标定。
 - 状态快照包含目标 id、是否可见、当前 `error_x`、`area`、确认计数和错误。AprilTag 读取异常或 STM32 异常会尝试安全 STOP 并进入 `FAULT`；STOP 本身失败则保持 `FAULT` 可观测。
@@ -231,6 +233,19 @@ delay 500 ms
 - 若路线从一个 T 路口开始，调用方必须提供当前 `NORTH/SOUTH/EAST/WEST` heading；否则第一动作无法可靠判断并抛出 `RouteActionUnknownError`。缺少方向、非相邻节点、非路口处改变方向或 180° 掉头同样明确失败，不会默认选择 `STRAIGHT`。
 - `build_zone`、`right_corridor_reference`、`bottom_direction_reference` 仍没有已确认拓扑边，因此不能规划或解析到这些节点。己方半场镜像和现场朝向仍需人工确认，未由示意图像素推算坐标。
 - 该解析器不导入硬件层、不保存比赛任务状态，也不发送串口。它和尚未接入 CompetitionRunner 的人工测试入口之间只有纯数据调用。
+
+当前 RouteExecutor 的真实能力边界：
+
+- `prepare_route()` 只调用 TopologicalNavigator 和 RouteActionResolver，保存 route、actions、目标 Tag、显式 `arrival_area` / `confirm_frames` 和当前动作下标，不打开设备或发送运动命令。
+- 只有显式 `start()` 才先预设第一个 `NEXT_TURN`，再发送并等待 `ACK,LINE_START`。之后单步 `poll()` 是路口阶段唯一的 STM32 回复读取者。
+- 状态依次包含 `IDLE -> PLANNING -> READY -> WAITING_JUNCTION -> TURNING -> WAITING_TURN_DONE`；最后一个匹配的 `TURN_DONE` 后先进入 `ROUTE_TURNS_DONE`，再交接到 `FINAL_TAG_APPROACH -> ARRIVED -> FINISHED`。当前动作下标、当前动作和全部动作均可查询。
+- 一个 `TURN_DONE` 只完成当前一个动作。只有方向与当前预期完全一致且事件顺序正确，才递增下标并发送下一个 `NEXT_TURN`；因此不会在前一动作完成前覆盖 STM32 pending turn。方向不匹配、重复或乱序事件均进入 `FAULT`。
+- 路口动作全部完成不代表到站。此后 RouteExecutor 停止读取 STM32，由 NavigationController 使用同一个 AprilTagService 逐帧观察目标；它复用既有连续面积确认和 STOP ACK 逻辑，并且不会再次发送 `LINE_START`。
+- 只有 NavigationController 已进入 `ARRIVED`、`TopologicalNavigator.update_from_tag(target_tag)` 返回预期目标位置后，RouteExecutor 才进入 `ARRIVED`，下一单步进入 `FINISHED`。没有路口动作的路线会直接调用既有 `start_line_to_tag()` 进入最终 Tag 阶段。
+- Pi 侧 watchdog 当前默认等待下一路口 30 s、等待转向事件完成 5 s、等待最终 Tag 30 s；它们不修改 STM32 内部 1200/2000 ms timeout，并可由人工入口显式覆盖。超时、协议错误、规划/解析错误、AprilTag 异常或 NavigationController FAULT 都会锁定 `FAULT` 并尝试 STOP。
+- target Tag 必须与 field model 的目标节点映射一致。`arrival_area` 必须由调用方明确给出，没有把不同 Tag 的现场数据硬编码进 RouteExecutor。
+- 该执行器未接 K230D、机械臂或 CompetitionRunner，多路口实车验证尚未进行。
+- 近距离时 Tag 可能因相机安装较低而移出画面；NavigationController 当前只会把丢帧清零，尚无“曾经很近后突然消失”的专用安全判定。RouteExecutor 的最终 Tag watchdog 会超时停车，但不能替代后续现场确认和视觉安全设计。
 
 当前 CompetitionRunner 的真实能力边界：
 
@@ -355,6 +370,26 @@ python3 tests/test_junction_turn.py \
 
 只有输入严格大写 `START` 后，脚本才构造/连接 `Stm32Link`，依次等待 `ACK,NEXT_TURN,<turn>` 与 `ACK,LINE_START`，随后打印 `JUNCTION_DETECTED`、`TURN_STARTED,...`、`TURN_DONE,...`。收到 `TURN_DONE` 后立即要求 STOP ACK 并退出，不会自动预设或通过第二个路口。`ERR,TURN_TIMEOUT`、`ERR,REACQUIRE_TIMEOUT`、`ERR,NO_PENDING_TURN` 和其他协议异常都会打印 `FAULT`，并在清理路径尝试 STOP。Ctrl+C 同样 STOP 并关闭串口。该入口不会被自动运行，路线动作适配尚未接入 CompetitionRunner。
 
+### 6.4.3 多路口路线人工入口
+
+第一条建议现场验证的两动作路线使用已验证过到站阈值的 Tag 4：
+
+```bash
+python3 tests/test_multi_junction_route.py \
+  --start right_material_t_junction \
+  --target right_orange_material \
+  --target-tag 4 \
+  --heading EAST \
+  --arrival-area 10000 \
+  --confirm-frames 3
+```
+
+纯软件预览为 `right_material_t_junction -> roof_material_t_junction -> right_orange_material`，动作是 `LEFT -> STRAIGHT`。`--heading EAST` 描述进入当前起始 T 路口前的实际朝向；现场摆车位置和方向必须与它一致。`arrival_area=10000`、`confirm_frames=3` 只对应已有 Tag 4 布置记录，不应复制给未经验证的 Tag 2 或其他新布置。
+
+脚本在 START 前只规划并打印 start、target、route、actions、target Tag 和到站参数；不是严格大写 `START` 时不会构造或连接 STM32/AprilTag 服务。确认后只创建一个 Stm32Link、一个 AprilTagService 和一个 RouteExecutor。RouteExecutor 在路口阶段独占 STM32 读取，最后一个 `TURN_DONE` 后切换到 NavigationController 的相机单步更新；不存在第二串口线程或并发 `readline()`。
+
+运行输出会依次标出当前 `action i/n`、`JUNCTION_DETECTED`、`TURN_STARTED,...`、`TURN_DONE,...`、`ALL JUNCTION ACTIONS DONE`、`SEARCHING TARGET TAG`、`TAG ... ARRIVED` 和 `ROUTE FINISHED`。只有目标 Tag 连续达标并收到 STOP ACK、拓扑位置更新成功后才会完成。Ctrl+C、watchdog、协议/相机异常和状态错序都会尝试 STOP 并释放相机与串口；完成路径依赖 NavigationController 已确认的 STOP ACK 保持停车。该入口尚未进行多路口实车验证，也没有接入 CompetitionRunner。
+
 ### 6.5 STM32 入口
 
 STM32 不在本 Git 仓库中。当前外部源码入口为 `D:\Code\V1.3_vision\V1.3\Core\Src\main.c`，Keil 工程为 `D:\Code\V1.3_vision\V1.3\MDK-ARM\f407_ustc_2022_robogame.uvprojx`。2026-09-12 的路口状态机版本已使用 ARMCC V5 全量重编译，结果为 0 error、1 个原有 `Test_All` 未引用警告；没有自动烧录或运行。
@@ -383,15 +418,17 @@ STM32 不在本 Git 仓库中。当前外部源码入口为 `D:\Code\V1.3_vision
 
 `tests/` 主要是一组人工硬件诊断脚本。多数旧脚本在导入或启动时立即打开串口，其中 `motor_cmd_test.py` 会直接让底盘运动；不能批量运行，也不能在主控制器占用同一串口时运行。
 
-AprilTag 两个旧脚本同样是相机人工测试，不包含断言。`test_line_to_tag.py`、`test_navigation_topology_live.py` 和新增 `test_junction_turn.py` 都是带人工启动确认且会驱动底盘的实机入口，不能由自动测试调用。`test_line_sensor_capture.py` 只允许 `LINE_STATUS`，不会驱动任何执行器，但会打开真实 STM32 串口，仍需人工单独运行。`test_junction_turn_unit.py` 使用 FakeSerial 覆盖 LEFT/RIGHT/STRAIGHT 的发送与 ACK、非法方向、STM32 ERR、路口事件解析及未输入严格 `START` 时不构造硬件链路；其他既有 Fake 测试继续覆盖传感器、导航、拓扑和 STOP。所有这些单元测试都不连接硬件。
+AprilTag 两个旧脚本同样是相机人工测试，不包含断言。`test_line_to_tag.py`、`test_navigation_topology_live.py`、`test_junction_turn.py` 和 `test_multi_junction_route.py` 都是带人工启动确认且会驱动底盘的实机入口，不能由自动测试调用。`test_line_sensor_capture.py` 只允许 `LINE_STATUS`，不会驱动任何执行器，但会打开真实 STM32 串口，仍需人工单独运行。
+
+`test_route_executor_unit.py` 使用四类 Fake 覆盖两/三动作严格推进、方向不匹配、重复事件、Pi watchdog、全部路口完成但未到站、最终 ARRIVED 后拓扑更新、NavigationController FAULT、AprilTag 异常、STM32 协议错误、空 route 和零路口路线。`test_multi_junction_route_unit.py` 确认未输入严格 `START` 时 STM32/Camera factory 均不会调用。`test_navigation_controller_unit.py` 新增确认最后路口交接不会重复发送 `LINE_START`。其他既有 Fake 测试继续覆盖 resolver、拓扑、Junction 协议、传感器和 STOP；所有单元测试都不连接硬件。
 
 ## 8. 当前未完成任务和已知缺口
 
 1. `CompetitionRunner` 已定义第一版事件顺序，但 `LINE_DONE`、`TARGET_READY`、`ARM_DONE`、`BUILD_DONE` 目前均没有真实生产者，只能由测试或未来适配层注入。
 2. `competition/main.py` 固定使用 simulation mode，尚未实现显式连接、握手、运行循环、统一退出 STOP 和资源关闭；当前可运动的联调入口仍是 `main_controller_align.py`。
-3. 当前 STM32 直线巡线和独立脚本的 ARRIVED→拓扑更新已完成 Tag 3/4/5 第一轮现场验证；新增路口事件和动作仍未实车验证，也没有接入 NavigationController/CompetitionRunner。`TURN_DONE` 不是 `LINE_DONE` 或比赛到站事件。早前 Tag 5 偶发 STOP ACK timeout 的诊断能力继续保留，后续实测暂未复现，根因尚未确认。
-4. 世界模型已有无坐标逻辑图，但仍缺少六个 Tag 中心 `(x, y, yaw)`、黑线节点/线段长度和关键停车点实测值；当前不能生成距离、转向或底盘动作。
-5. AprilTag 目前只有像素误差和像素面积，没有相机内参、畸变校正或姿态估计；到站控制器只增加连续帧确认，`arrival_area` 仍需按实际停车距离标定。
+3. 当前 STM32 直线巡线和独立脚本的 ARRIVED→拓扑更新已完成 Tag 3/4/5 第一轮现场验证；新增路口事件和动作以及 RouteExecutor 连续路口链仍未实车验证，也没有接入 CompetitionRunner。`TURN_DONE` 只推进一个路口动作，不是 `LINE_DONE` 或比赛到站事件。早前 Tag 5 偶发 STOP ACK timeout 的诊断能力继续保留，后续实测暂未复现，根因尚未确认。
+4. 世界模型已有无坐标逻辑图和离散转向，但仍缺少六个 Tag 中心 `(x, y, yaw)`、黑线节点/线段长度和关键停车点实测值；当前不能生成距离动作或基于坐标的轨迹。
+5. AprilTag 目前只有像素误差和像素面积，没有相机内参、畸变校正或姿态估计；到站控制器只增加连续帧确认，`arrival_area` 仍需按实际停车距离标定。近距离 Tag 移出画面后的专用安全判定尚未实现。
 6. K230D 的橙色、紫色检测结果如何触发取料尚未定义；TaskController 已有接口，但现有 ArmSequence 没有经过确认的独立橙色/紫色抓取动作。STM32 `Test_All()` 中虽有一个禁用的“±3000/±5000 + 底盘移动”旧候选，但缺少颜色/存放语义、调用证据、起始高度和实机版本确认，不能直接采用。
 7. 新增链路层已引用 `config.py`；旧主控和部分诊断脚本仍复制路径或使用 `/dev/ttyUSB*` 等易漂移路径。
 8. 没有 `requirements.txt` 或其他依赖锁定文件。已知 Pi 环境包含 `pyserial`、`numpy`、`opencv-python-headless` 和 `pupil_apriltags`，但版本没有记录。
@@ -422,8 +459,8 @@ Pi 工作区和 Git 历史中没有 `docs/STM32_PROJECT_MAP.md` 和 `docs/STM32_
 1. 烧录前人工复核 `NEXT_TURN`、路口候选、转向符号、所有速度和 timeout；保留当前固件以便回退。
 2. 架空轮或安全支撑下只验证 `NEXT_TURN` 不会立即运动、非法参数返回 ERR、STOP 清除预设；然后在低风险场地逐项验证 LEFT、RIGHT，最后仅在确有直行出口处验证 STRAIGHT。
 3. 每项记录 `JUNCTION_DETECTED -> TURN_STARTED -> TURN_DONE`、四路原始值和实际耗时；重点标定连续确认/re-arm 周期、最低动作时间、低速/omega 和两级 timeout。
-4. 路口单项稳定后，再把已完成的 RouteActionResolver 和协议事件接入 NavigationController/Runner；当前仍只由人工入口取路线的第一个动作，不能自动连续通过多个路口。
-5. 继续单独处理普通 LINE_FOLLOW 下的持续 `0000` 风险，并现场测量 Tag、T 字路口和停车点；本轮未改变 AprilTag 或坐标 TODO。
-6. 为 CompetitionRunner 设计独立、显式的 live 生命周期；在安全审查前保持 `competition/main.py` 默认 simulation mode。
+4. 单路口稳定后，使用 `test_multi_junction_route.py` 先验证 Tag 4 的 `LEFT -> STRAIGHT` 两动作路线，再考虑三动作路线；记录每次 NEXT_TURN ACK、事件顺序、动作下标、Pi watchdog 和最终 STOP ACK。
+5. 多路口与最终 Tag 到站稳定后，再设计 RouteExecutor 接入 CompetitionRunner 的事件和 live 生命周期；当前 `competition/main.py` 继续固定 simulation mode。
+6. 继续单独处理普通 LINE_FOLLOW 下持续 `0000` 和近距离 Tag 移出画面的安全风险，并现场测量 Tag、T 字路口和停车点；本轮未改变 AprilTag 算法或坐标 TODO。
 
-当前最准确的完成度描述是：STM32 直线巡线、AprilTag 单项检测以及独立人工入口的“指定 Tag 到站—STOP ACK—ARRIVED—拓扑位置更新”已有现场结果。基于真实 CSV 的 T 字路口第一版已具备 1110/1111 连续确认、Pi pending turn、LEFT/RIGHT/STRAIGHT、0110 重捕、锁存 re-arm 和 timeout fault，并已通过软件/编译验证，但尚未烧录和实车验证。普通巡线全白安全、搭建区连线、Tag 姿态修正和完整比赛流程仍未完成。
+当前最准确的完成度描述是：STM32 直线巡线、AprilTag 单项检测以及独立人工入口的“指定 Tag 到站—STOP ACK—ARRIVED—拓扑位置更新”已有现场结果。基于真实 CSV 的 T 字路口第一版已具备 1110/1111 连续确认、Pi pending turn、LEFT/RIGHT/STRAIGHT、0110 重捕、锁存 re-arm 和 timeout fault；Pi 侧 RouteExecutor 已完成连续动作、严格事件校验和最终 Tag 到站的软件闭环，但两者都尚未完成连续多路口实车验证。普通巡线全白安全、近距离 Tag 丢失、搭建区连线、Tag 姿态修正和完整比赛流程仍未完成。

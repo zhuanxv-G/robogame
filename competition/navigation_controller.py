@@ -131,6 +131,41 @@ class NavigationController:
         Calling this method performs one LINE_START write; subsequent work is
         advanced one camera frame at a time by :meth:`update`.
         """
+        self._configure_line_to_tag(tag_id, arrival_area, confirm_frames)
+
+        try:
+            self._last_command = self._stm32.send_command("LINE_START")
+        except Exception as exc:
+            self._enter_fault(exc)
+            raise
+
+        self._state = NavigationState.LINE_FOLLOWING
+        return self._state
+
+    def continue_line_to_tag(
+        self,
+        tag_id: int,
+        arrival_area: float,
+        confirm_frames: int,
+    ) -> NavigationState:
+        """Watch a target Tag while an existing LineNav run continues.
+
+        This method deliberately does not send ``LINE_START``.  It is for an
+        injected route executor that already owns the active junction-event
+        phase and hands control to AprilTag arrival monitoring after the final
+        turn has completed.
+        """
+        self._configure_line_to_tag(tag_id, arrival_area, confirm_frames)
+        self._state = NavigationState.LINE_FOLLOWING
+        return self._state
+
+    def _configure_line_to_tag(
+        self,
+        tag_id: int,
+        arrival_area: float,
+        confirm_frames: int,
+    ) -> None:
+        """Validate and store one Tag-arrival request without motion I/O."""
         self._validate_tag_id(tag_id)
         if isinstance(arrival_area, bool):
             raise TypeError("arrival_area must be a number")
@@ -157,15 +192,6 @@ class NavigationController:
         self._confirm_frames = confirm_frames
         self._confirm_count = 0
         self._error = None
-
-        try:
-            self._last_command = self._stm32.send_command("LINE_START")
-        except Exception as exc:
-            self._enter_fault(exc)
-            raise
-
-        self._state = NavigationState.LINE_FOLLOWING
-        return self._state
 
     def update(self) -> NavigationState:
         """Process one AprilTag frame for an active line-to-Tag run."""

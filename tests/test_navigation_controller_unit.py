@@ -128,6 +128,22 @@ class LineToTagTests(unittest.TestCase):
             "STOP",
         )
 
+    def test_continue_line_to_tag_does_not_send_another_line_start(self) -> None:
+        stm32 = FakeStm32Link()
+        apriltag = FakeAprilTagService([[detection(4, 12000)]])
+        controller = NavigationController(stm32, apriltag)
+
+        state = controller.continue_line_to_tag(
+            4,
+            arrival_area=10000,
+            confirm_frames=1,
+        )
+
+        self.assertIs(state, NavigationState.LINE_FOLLOWING)
+        self.assertEqual(stm32.commands, [])
+        self.assertIs(controller.update(), NavigationState.ARRIVED)
+        self.assertEqual(stm32.stop_calls, 1)
+
     def test_missing_frame_resets_confirmation_count(self) -> None:
         frames = [
             [detection(2, 12000)],

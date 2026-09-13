@@ -22,6 +22,19 @@ from .route_action_resolver import (
     RouteActionUnknownError,
     resolve_route_actions,
 )
+from .route_executor import (
+    RouteExecutor,
+    RouteExecutorConfig,
+    RouteExecutorError,
+    RouteExecutorEventError,
+    RouteExecutorLifecycleError,
+    RouteExecutorNavigationError,
+    RouteExecutorPlanningError,
+    RouteExecutorState,
+    RouteExecutorTimeoutError,
+    RoutePlan,
+    build_route_plan,
+)
 from .tag_map import TAG_MAP
 from .topological_navigation import (
     RouteNotFoundError,
@@ -44,7 +57,17 @@ __all__ = [
     "RouteAction",
     "RouteActionResolver",
     "RouteActionUnknownError",
+    "RouteExecutor",
+    "RouteExecutorConfig",
+    "RouteExecutorError",
+    "RouteExecutorEventError",
+    "RouteExecutorLifecycleError",
+    "RouteExecutorNavigationError",
+    "RouteExecutorPlanningError",
+    "RouteExecutorState",
+    "RouteExecutorTimeoutError",
     "RouteNotFoundError",
+    "RoutePlan",
     "TAG_MAP",
     "TAG_TOPOLOGY_LOCATIONS",
     "TAG_ZONES",
@@ -57,5 +80,6 @@ __all__ = [
     "ZONE_MAP",
     "ZoneInfo",
     "get_zone_by_tag",
+    "build_route_plan",
     "resolve_route_actions",
 ]
