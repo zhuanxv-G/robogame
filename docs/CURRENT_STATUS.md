@@ -44,6 +44,7 @@ robogame/
 ├── strategy/
 │   └── mission.py                 # 比赛任务枚举、顺序和任务元数据
 ├── tests/                         # 人工执行的相机/串口/运动诊断脚本
+│   └── test_old_grab_sequence.py # 旧抓放候选机械臂动作独立测试入口
 ├── legacy/                        # 旧主控、旧协议和早期原型
 ├── docs/                          # 环境、场地、协议、架构和状态文档
 ├── RoboGame2026 竞技组规则手册3_0.pdf
@@ -114,6 +115,7 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 | STM32 通信抽象层 | 骨架完成，未实机回归 | `Stm32Link` 封装 HELLO_STM32、STOP、VEL、NEXT_TURN、路口事件、Servo/Stepper，并要求显式 `connect()` |
 | STM32 底盘、电机、巡线 | 直线可用，路口骨架待实车 | 正常巡线保持现有 0.80 m/s；新增 1110/1111 连续确认、pending turn、LEFT/RIGHT/STRAIGHT、0110 重捕和 timeout fault。路口动作尚未实车验证；普通巡线全白继续前进的风险仍存在 |
 | Servo、Stepper、机械臂 | 动作层已验证 | `ArmSequence` 可复用，三组搭建动作和安全 HOME 已保留；不要改动参数 |
+| 旧抓放候选测试 | 软件入口完成，待实机 | `test_old_grab_sequence.py` 按旧 `main.c:214-248` 的 27 步顺序执行可由现有协议表达的 Servo/Stepper 动作；三段 `Move_Distance` 因无定距协议只记录、不发送，也不以 `VEL` 冒充 |
 | K230D 物块视觉 | 单项检测已验证 | 当前主控能解析目标并完成对准/接近；完整橙色、紫色任务切换尚未接入 |
 | K230D 接口层 | 骨架完成，未实机回归 | `K230Link` 封装连接生命周期、现有 `TARGET` / `NO_TARGET` 解析格式和最新消息读取 |
 | K230D 对准到搭建 | 第一版已接通 | `main_controller_align.py` 可从 ALIGN/APPROACH 到 READY，再经人工 `b` 确认执行 ARM_BUILD |
@@ -280,6 +282,17 @@ STOP -> ALIGN <-> APPROACH -> READY -> ARM_BUILD -> BUILD_DONE
 
 此入口会驱动真实机械结构，只能在人工确认环境安全后执行。
 
+#### 6.3.1 旧抓放候选机械臂测试入口
+
+```bash
+python3 tests/test_old_grab_sequence.py --dry-run
+python3 tests/test_old_grab_sequence.py
+```
+
+`--dry-run` 只打印旧 27 步动作表，不打开串口。实机入口必须输入严格的 `START` 才连接；连接后的第一条命令为 `STOP` 并等待 ACK，随后只使用 `SERVO_SET` 和 `STEPPER_MOVE` 执行可表达的机械臂动作，正常结束再次 `STOP`。每条命令分别打印发送、ACK 和 DONE；`SERVO_SET` / `STOP` 的现有协议没有 DONE，日志会明确标记为不适用，`STEPPER_MOVE` 则必须收到真实 `STEPPER_MOVE_DONE`。Ctrl+C、任意 `ERR` 或其他异常都会优先请求 `STOP` 再退出。
+
+脚本保留旧 `main.c:214-248` 的全部 27 个源码步骤及原延时，并把三段底盘 `Move_Distance` 留在原位置显示；当前 UART 没有等价的定距闭环命令，因此这三步不会发送，脚本也不会用开环 `VEL` 近似。该入口只用于固定底盘后的旧机械臂候选实机验证，不表示完整抓放候选或颜色/箱位语义已经验证；它没有修改或复用 `ArmSequence` 的既有搭建动作。
+
 ### 6.4 视觉与导航人工测试入口
 
 ```bash
@@ -418,7 +431,7 @@ STM32 不在本 Git 仓库中。当前外部源码入口为 `D:\Code\V1.3_vision
 
 `tests/` 主要是一组人工硬件诊断脚本。多数旧脚本在导入或启动时立即打开串口，其中 `motor_cmd_test.py` 会直接让底盘运动；不能批量运行，也不能在主控制器占用同一串口时运行。
 
-AprilTag 两个旧脚本同样是相机人工测试，不包含断言。`test_line_to_tag.py`、`test_navigation_topology_live.py`、`test_junction_turn.py` 和 `test_multi_junction_route.py` 都是带人工启动确认且会驱动底盘的实机入口，不能由自动测试调用。`test_line_sensor_capture.py` 只允许 `LINE_STATUS`，不会驱动任何执行器，但会打开真实 STM32 串口，仍需人工单独运行。
+AprilTag 两个旧脚本同样是相机人工测试，不包含断言。`test_line_to_tag.py`、`test_navigation_topology_live.py`、`test_junction_turn.py` 和 `test_multi_junction_route.py` 都是带人工启动确认且会驱动底盘的实机入口，不能由自动测试调用。`test_old_grab_sequence.py` 只有在严格输入 `START` 后才驱动 Servo/Stepper，并在启动、Ctrl+C、ERR、异常和正常完成路径请求 STOP；它也不能由自动测试调用。`test_line_sensor_capture.py` 只允许 `LINE_STATUS`，不会驱动任何执行器，但会打开真实 STM32 串口，仍需人工单独运行。
 
 `test_route_executor_unit.py` 使用四类 Fake 覆盖两/三动作严格推进、方向不匹配、重复事件、Pi watchdog、全部路口完成但未到站、最终 ARRIVED 后拓扑更新、NavigationController FAULT、AprilTag 异常、STM32 协议错误、空 route 和零路口路线。`test_multi_junction_route_unit.py` 确认未输入严格 `START` 时 STM32/Camera factory 均不会调用。`test_navigation_controller_unit.py` 新增确认最后路口交接不会重复发送 `LINE_START`。其他既有 Fake 测试继续覆盖 resolver、拓扑、Junction 协议、传感器和 STOP；所有单元测试都不连接硬件。
 
