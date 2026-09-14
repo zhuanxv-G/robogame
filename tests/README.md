@@ -26,5 +26,7 @@
 | `uart_receive_test.py` | GPIO UART 接收诊断 | 使用 `/dev/serial0`，注释期望 STM32 |
 | `uart_test.py` | 早期 STM32 握手诊断 | 使用易漂移的 `/dev/ttyUSB0` |
 | `vel_test.py` | 人工验证 `VEL`、看门狗和 `STOP` | 使用 STM32 by-id，仍有实际硬件测试价值 |
+| `test_apriltag.py` | 持续检测并输出全部 AprilTag | 使用 `/dev/video0`，不连接 STM32、不驱动机器人 |
+| `test_localization.py` | 输出面积最大 Tag 的轻量定位信息 | 使用 `/dev/video0`，不连接 STM32、不驱动机器人 |
 
 `legacy/stepper_test.py` 没有放在这里，因为它使用 `STEPPER_SLOW` / `STEPPER_NUDGE`，与当前正式 `STEPPER_MOVE,<steps>,<pps>` 协议不一致。

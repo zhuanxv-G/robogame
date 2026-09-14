@@ -1,5 +1,7 @@
 # RoboGame Raspberry Pi 工程盘点与整理报告
 
+> 历史快照：本文记录 2026-09-05 前后的整理状态。此后项目已经完成 `ArmSequence` 重构、主控机械臂接入、AprilTag、定位和场地世界模型；当前状态请以 `CURRENT_STATUS.md`、`PI_STM32_PROTOCOL.md` 和 `SOFTWARE_ARCHITECTURE.md` 为准。本文的旧文件分类与演进记录仍可用于追溯。
+
 盘点日期：2026-09-05
 
 ## 1. 结论
