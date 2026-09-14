@@ -34,8 +34,10 @@ VELOCITY_ACK_TIMEOUT_S = 0.5
 SERIAL_POLL_TIMEOUT_S = 0.01
 STEPPER_PPS = 800
 SWEEP_STEP_DELAY_S = 0.01
-DEFAULT_DRIVE_SPEED_M_S = 0.20
-MAX_DRIVE_SPEED_M_S = 0.30
+DEFAULT_COMMAND_SPEED_M_S = 0.80
+MAX_COMMAND_SPEED_M_S = 0.80
+DEFAULT_FORWARD_ACTUAL_SPEED_M_S = 0.118
+DEFAULT_BACKWARD_ACTUAL_SPEED_M_S = 0.118
 VELOCITY_REFRESH_S = 0.10
 
 
@@ -130,14 +132,21 @@ OLD_SEQUENCE: tuple[OldAction, ...] = (
 )
 
 
-def _drive_speed(value: str) -> float:
+def _positive_speed(value: str) -> float:
     try:
         speed = float(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("速度必须是数字") from exc
-    if not math.isfinite(speed) or not 0.0 < speed <= MAX_DRIVE_SPEED_M_S:
+    if not math.isfinite(speed) or speed <= 0.0:
+        raise argparse.ArgumentTypeError("速度必须是有限正数")
+    return speed
+
+
+def _command_speed(value: str) -> float:
+    speed = _positive_speed(value)
+    if speed > MAX_COMMAND_SPEED_M_S:
         raise argparse.ArgumentTypeError(
-            f"速度必须在 (0, {MAX_DRIVE_SPEED_M_S:.2f}] m/s 范围内"
+            f"命令速度必须在 (0, {MAX_COMMAND_SPEED_M_S:.2f}] 范围内"
         )
     return speed
 
@@ -155,14 +164,28 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="print the retained 27-step source plan without opening UART",
     )
     parser.add_argument(
-        "--drive-speed",
-        type=_drive_speed,
-        default=DEFAULT_DRIVE_SPEED_M_S,
+        "--command-speed",
+        type=_command_speed,
+        default=DEFAULT_COMMAND_SPEED_M_S,
         metavar="M_S",
         help=(
-            "open-loop chassis speed for distance estimates "
-            f"(default: %(default).2f, max: {MAX_DRIVE_SPEED_M_S:.2f} m/s)"
+            "absolute VEL.Y command sent to STM32 "
+            f"(default: %(default).2f, max: {MAX_COMMAND_SPEED_M_S:.2f})"
         ),
+    )
+    parser.add_argument(
+        "--forward-actual-speed",
+        type=_positive_speed,
+        default=DEFAULT_FORWARD_ACTUAL_SPEED_M_S,
+        metavar="M_S",
+        help="measured forward physical speed used for timing",
+    )
+    parser.add_argument(
+        "--backward-actual-speed",
+        type=_positive_speed,
+        default=DEFAULT_BACKWARD_ACTUAL_SPEED_M_S,
+        metavar="M_S",
+        help="measured backward physical speed used for timing",
     )
     return parser.parse_args(argv)
 
@@ -268,25 +291,37 @@ def _drive_distance_open_loop(
     stm32: Stm32Link,
     action: OldAction,
     *,
-    drive_speed: float,
+    command_speed: float,
+    forward_actual_speed: float,
+    backward_actual_speed: float,
     output: Callable[[str], object],
     clock: Callable[[], float],
 ) -> None:
     """Approximate one old distance move with refreshed VEL and STOP."""
-    if (
-        not math.isfinite(drive_speed)
-        or not 0.0 < drive_speed <= MAX_DRIVE_SPEED_M_S
-    ):
+    if not 0.0 < command_speed <= MAX_COMMAND_SPEED_M_S:
         raise ValueError(
-            f"drive_speed must be in (0, {MAX_DRIVE_SPEED_M_S:.2f}] m/s"
+            f"command_speed must be in (0, {MAX_COMMAND_SPEED_M_S:.2f}]"
         )
+    if not math.isfinite(command_speed):
+        raise ValueError("command_speed must be finite")
+    for name, speed in (
+        ("forward_actual_speed", forward_actual_speed),
+        ("backward_actual_speed", backward_actual_speed),
+    ):
+        if not math.isfinite(speed) or speed <= 0.0:
+            raise ValueError(f"{name} must be a finite positive value")
+
     label = _step_label(action.step)
     distance_m, old_speed_m_s = (float(value) for value in action.values)
-    velocity_y = math.copysign(drive_speed, distance_m)
-    duration_s = abs(distance_m) / drive_speed
+    actual_speed = (
+        forward_actual_speed if distance_m > 0.0 else backward_actual_speed
+    )
+    velocity_y = math.copysign(command_speed, distance_m)
+    duration_s = abs(distance_m) / actual_speed
     output(
         f"[{label}] 开环距离估算: distance={distance_m:+.2f} m, "
-        f"VEL y={velocity_y:+.2f} m/s, duration={duration_s:.2f} s"
+        f"VEL.Y命令={velocity_y:+.2f}, 实测速度基线={actual_speed:.3f} m/s, "
+        f"duration={duration_s:.2f} s"
     )
     output(
         f"[{label}] 旧速度参数={old_speed_m_s:.2f} m/s；"
@@ -361,7 +396,9 @@ def _execute_sweep(
 def execute_old_sequence(
     stm32: Stm32Link,
     *,
-    drive_speed: float = DEFAULT_DRIVE_SPEED_M_S,
+    command_speed: float = DEFAULT_COMMAND_SPEED_M_S,
+    forward_actual_speed: float = DEFAULT_FORWARD_ACTUAL_SPEED_M_S,
+    backward_actual_speed: float = DEFAULT_BACKWARD_ACTUAL_SPEED_M_S,
     output: Callable[[str], object] = print,
     clock: Callable[[], float] = time.monotonic,
 ) -> None:
@@ -401,7 +438,9 @@ def execute_old_sequence(
             _drive_distance_open_loop(
                 stm32,
                 action,
-                drive_speed=drive_speed,
+                command_speed=command_speed,
+                forward_actual_speed=forward_actual_speed,
+                backward_actual_speed=backward_actual_speed,
                 output=output,
                 clock=clock,
             )
@@ -472,7 +511,14 @@ def run_test(
     output("WARNING: 本入口会驱动 Servo 和 Stepper，Stepper 没有回零/限位语义。")
     output("WARNING: 本入口也会驱动底盘；请清空场地并准备人工急停。")
     output("WARNING: 距离由VEL时间估算，没有编码器反馈，必须实车测量误差。")
-    output(f"drive_speed={args.drive_speed:.2f} m/s")
+    output(f"command_speed={args.command_speed:.2f}")
+    output(
+        f"forward_actual_speed={args.forward_actual_speed:.3f} m/s"
+    )
+    output(
+        f"backward_actual_speed={args.backward_actual_speed:.3f} m/s "
+        "(暂沿用前进基线，待单独标定)"
+    )
     _print_plan(output)
 
     if args.dry_run:
@@ -497,7 +543,9 @@ def run_test(
         )
         execute_old_sequence(
             stm32,
-            drive_speed=args.drive_speed,
+            command_speed=args.command_speed,
+            forward_actual_speed=args.forward_actual_speed,
+            backward_actual_speed=args.backward_actual_speed,
             output=output,
             clock=clock,
         )

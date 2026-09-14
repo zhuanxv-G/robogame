@@ -115,7 +115,7 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 | STM32 通信抽象层 | 骨架完成，未实机回归 | `Stm32Link` 封装 HELLO_STM32、STOP、VEL、NEXT_TURN、路口事件、Servo/Stepper，并要求显式 `connect()` |
 | STM32 底盘、电机、巡线 | 直线可用，路口骨架待实车 | 正常巡线保持现有 0.80 m/s；新增 1110/1111 连续确认、pending turn、LEFT/RIGHT/STRAIGHT、0110 重捕和 timeout fault。路口动作尚未实车验证；普通巡线全白继续前进的风险仍存在 |
 | Servo、Stepper、机械臂 | 动作层已验证 | `ArmSequence` 可复用，三组搭建动作和安全 HOME 已保留；不要改动参数 |
-| 旧抓放候选测试 | 软件入口完成，待实机 | `test_old_grab_sequence.py` 按旧 `main.c:214-248` 的 27 步顺序执行 Servo/Stepper 和三段底盘距离动作；距离因无编码器协议而以默认 0.20 m/s 的定时 `VEL` 开环估算，每段结束立即 STOP，精度待实车测量 |
+| 旧抓放候选测试 | 软件入口完成，待实机 | `test_old_grab_sequence.py` 按旧 `main.c:214-248` 的 27 步顺序执行 Servo/Stepper 和三段底盘距离动作；STM32 `VEL.Y` 上限已放宽至 ±0.80，脚本默认发送 ±0.80，并按巡线实测 0.118 m/s 分开估算时间，每段结束立即 STOP |
 | K230D 物块视觉 | 单项检测已验证 | 当前主控能解析目标并完成对准/接近；完整橙色、紫色任务切换尚未接入 |
 | K230D 接口层 | 骨架完成，未实机回归 | `K230Link` 封装连接生命周期、现有 `TARGET` / `NO_TARGET` 解析格式和最新消息读取 |
 | K230D 对准到搭建 | 第一版已接通 | `main_controller_align.py` 可从 ALIGN/APPROACH 到 READY，再经人工 `b` 确认执行 ARM_BUILD |
@@ -286,12 +286,15 @@ STOP -> ALIGN <-> APPROACH -> READY -> ARM_BUILD -> BUILD_DONE
 
 ```bash
 python3 tests/test_old_grab_sequence.py --dry-run
-python3 tests/test_old_grab_sequence.py --drive-speed 0.20
+python3 tests/test_old_grab_sequence.py \
+  --command-speed 0.80 \
+  --forward-actual-speed 0.118 \
+  --backward-actual-speed 0.118
 ```
 
 `--dry-run` 只打印旧 27 步动作表，不打开串口。实机入口必须输入严格的 `START` 才连接；连接后的第一条命令为 `STOP` 并等待 ACK，随后按原顺序使用 `SERVO_SET`、`STEPPER_MOVE` 和 `VEL`，正常结束再次 `STOP`。每条命令分别打印发送、ACK 和 DONE；`SERVO_SET`、`VEL`、`STOP` 的现有协议没有 DONE，日志会明确标记为不适用，`STEPPER_MOVE` 则必须收到真实 `STEPPER_MOVE_DONE`。Ctrl+C、任意 `ERR` 或其他异常都会优先请求 `STOP` 再退出。
 
-脚本保留旧 `main.c:214-248` 的全部 27 个源码步骤及原延时。当前 UART 没有等价的定距闭环命令，因此三段 `Move_Distance` 改由 Pi 每 100 ms 刷新 `VEL` 并按时间估算距离；默认 0.20 m/s 下，+0.50 m、-0.05 m、-0.30 m 分别持续约 2.50 s、0.25 s、1.50 s，每段结束发送 STOP 并等待 ACK。该实现保留方向和目标距离，但不是旧版编码器闭环，实际行程会受加减速、打滑、负载和通信延迟影响，必须在清空场地后实车测量。`--drive-speed` 只允许 `(0, 0.30] m/s`；该入口不表示完整抓放候选或颜色/箱位语义已经验证，也没有修改或复用 `ArmSequence` 的既有搭建动作。
+脚本保留旧 `main.c:214-248` 的全部 27 个源码步骤及原延时。UART 语法不变，STM32 只把 `VEL.Y` 合法范围从 ±0.30 放宽到 ±0.80；三段 `Move_Distance` 仍由 Pi 每 100 ms 刷新 `VEL` 并按时间估算。脚本默认发送 ±0.80 命令值，计时则使用独立的前进/后退实测速度参数；以目前唯一可用的巡线实测基线 0.118 m/s 计算，+0.50 m、-0.05 m、-0.30 m 分别持续约 4.24 s、0.42 s、2.54 s，每段结束发送 STOP 并等待 ACK。后退暂沿用前进基线，必须单独实测后更新；该实现不是旧版编码器闭环，实际行程仍会受加减速、打滑、负载和通信延迟影响。旧固件未烧录新上限时会返回 `ERR,VEL`，脚本随后立即 STOP。该入口不表示完整抓放候选或颜色/箱位语义已经验证，也没有修改或复用 `ArmSequence` 的既有搭建动作。
 
 ### 6.4 视觉与导航人工测试入口
 
@@ -406,6 +409,8 @@ python3 tests/test_multi_junction_route.py \
 ### 6.5 STM32 入口
 
 STM32 不在本 Git 仓库中。当前外部源码入口为 `D:\Code\V1.3_vision\V1.3\Core\Src\main.c`，Keil 工程为 `D:\Code\V1.3_vision\V1.3\MDK-ARM\f407_ustc_2022_robogame.uvprojx`。2026-09-12 的路口状态机版本已使用 ARMCC V5 全量重编译，结果为 0 error、1 个原有 `Test_All` 未引用警告；没有自动烧录或运行。
+
+同日按旧抓放候选测试需要，仅将外部 STM32 源码的 `RPI_VEL_Y_MAX_M_S` 从 `0.30f` 放宽到 `0.80f`；X 仍为 ±0.30，Omega 仍为 ±1.50，协议语法、ACK/ERR、REMOTE watchdog 和控制逻辑未改。ARMCC V5.06 update 7 再次全量构建并生成 HEX，结果为 0 error、1 个原有 `Test_All` 未引用警告；尚未烧录或实车验证。未烧录该版本时，旧固件会拒绝 `VEL.Y=±0.80`。
 
 ## 7. 当前测试状态
 
