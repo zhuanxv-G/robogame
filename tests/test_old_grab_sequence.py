@@ -1,15 +1,16 @@
-"""Manual replay of the old grab/release candidate's arm actions.
+"""Manual replay of the old grab/release candidate.
 
-The source candidate also contains three blocking chassis ``Move_Distance``
-calls. The current allowed UART commands cannot reproduce those distance
-moves, so this tool records them in their original positions but never
-substitutes an open-loop ``VEL`` command. Importing this module has no hardware
-side effects.
+Servo and Stepper actions use their current transactional UART commands. The
+three old blocking ``Move_Distance`` calls are approximated on the Pi with
+periodically refreshed ``VEL`` followed by ``STOP`` because the current UART
+protocol exposes no encoder-distance command. Importing this module has no
+hardware side effects.
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -29,9 +30,13 @@ from hardware.stm32_link import (  # noqa: E402
 
 
 ACK_TIMEOUT_S = 2.0
+VELOCITY_ACK_TIMEOUT_S = 0.5
 SERIAL_POLL_TIMEOUT_S = 0.01
 STEPPER_PPS = 800
 SWEEP_STEP_DELAY_S = 0.01
+DEFAULT_DRIVE_SPEED_M_S = 0.20
+MAX_DRIVE_SPEED_M_S = 0.30
+VELOCITY_REFRESH_S = 0.10
 
 
 class ActionKind(str, Enum):
@@ -125,17 +130,39 @@ OLD_SEQUENCE: tuple[OldAction, ...] = (
 )
 
 
+def _drive_speed(value: str) -> float:
+    try:
+        speed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("速度必须是数字") from exc
+    if not math.isfinite(speed) or not 0.0 < speed <= MAX_DRIVE_SPEED_M_S:
+        raise argparse.ArgumentTypeError(
+            f"速度必须在 (0, {MAX_DRIVE_SPEED_M_S:.2f}] m/s 范围内"
+        )
+    return speed
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Replay the Servo/Stepper portion of old main.c:214-248 "
-            "using the current Stm32Link protocol."
+            "Replay old main.c:214-248 with Servo/Stepper transactions "
+            "and open-loop timed VEL distance estimates."
         )
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="print the retained 27-step source plan without opening UART",
+    )
+    parser.add_argument(
+        "--drive-speed",
+        type=_drive_speed,
+        default=DEFAULT_DRIVE_SPEED_M_S,
+        metavar="M_S",
+        help=(
+            "open-loop chassis speed for distance estimates "
+            f"(default: %(default).2f, max: {MAX_DRIVE_SPEED_M_S:.2f} m/s)"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -151,7 +178,7 @@ def _print_plan(output: Callable[[str], object]) -> None:
     for action in OLD_SEQUENCE:
         suffix = ""
         if action.kind is ActionKind.CHASSIS_DISTANCE:
-            suffix = " [仅记录：当前协议不能忠实执行]"
+            suffix = " [以VEL定时估算；不是编码器闭环]"
         output(
             f"  [{_step_label(action.step)}] {action.description}{suffix}"
         )
@@ -222,17 +249,82 @@ def _send_stepper(
     output(f"[{label}] 收到DONE: {done}")
 
 
-def _log_unsupported_chassis_action(
-    action: OldAction,
+def _send_velocity(
+    stm32: Stm32Link,
+    velocity_y: float,
+    *,
+    label: str,
     output: Callable[[str], object],
 ) -> None:
+    command = f"VEL,0.00,{velocity_y:.2f},0.00"
+    output(f"[{label}] 发送命令: {command}")
+    stm32.send_command(command)
+    ack = stm32.wait_ack("VEL", VELOCITY_ACK_TIMEOUT_S)
+    output(f"[{label}] 收到ACK: {ack}")
+    output(f"[{label}] 收到DONE: 不适用（VEL协议只定义ACK）")
+
+
+def _drive_distance_open_loop(
+    stm32: Stm32Link,
+    action: OldAction,
+    *,
+    drive_speed: float,
+    output: Callable[[str], object],
+    clock: Callable[[], float],
+) -> None:
+    """Approximate one old distance move with refreshed VEL and STOP."""
+    if (
+        not math.isfinite(drive_speed)
+        or not 0.0 < drive_speed <= MAX_DRIVE_SPEED_M_S
+    ):
+        raise ValueError(
+            f"drive_speed must be in (0, {MAX_DRIVE_SPEED_M_S:.2f}] m/s"
+        )
     label = _step_label(action.step)
-    output(f"[{label}] 原动作: {action.description}")
+    distance_m, old_speed_m_s = (float(value) for value in action.values)
+    velocity_y = math.copysign(drive_speed, distance_m)
+    duration_s = abs(distance_m) / drive_speed
     output(
-        f"[{label}] 发送命令: 无（现有协议没有MOVE_DISTANCE，禁止用VEL替代）"
+        f"[{label}] 开环距离估算: distance={distance_m:+.2f} m, "
+        f"VEL y={velocity_y:+.2f} m/s, duration={duration_s:.2f} s"
     )
-    output(f"[{label}] 收到ACK: 不适用（未发送命令）")
-    output(f"[{label}] 收到DONE: 不适用（未发送命令）")
+    output(
+        f"[{label}] 旧速度参数={old_speed_m_s:.2f} m/s；"
+        "当前协议范围无法照搬，只保留方向和目标距离"
+    )
+
+    deadline = clock() + duration_s
+    refresh_index = 0
+    while clock() < deadline:
+        refresh_index += 1
+        refresh_label = _step_label(action.step, refresh_index)
+        refresh_due = min(deadline, clock() + VELOCITY_REFRESH_S)
+        _send_velocity(
+            stm32,
+            velocity_y,
+            label=refresh_label,
+            output=output,
+        )
+        remaining_s = refresh_due - clock()
+        if remaining_s > 0.0:
+            _guarded_delay(
+                stm32,
+                min(VELOCITY_REFRESH_S, remaining_s),
+                label=refresh_label,
+                output=output,
+                clock=clock,
+            )
+
+    _request_stop(
+        stm32,
+        label=f"{label}/距离结束",
+        output=output,
+        require_ack=True,
+    )
+    output(
+        f"[{label}] 收到DONE: Pi本地计时完成（非STM32里程DONE，"
+        "实际距离需实车测量）"
+    )
 
 
 def _execute_sweep(
@@ -240,6 +332,7 @@ def _execute_sweep(
     action: OldAction,
     *,
     output: Callable[[str], object],
+    clock: Callable[[], float],
 ) -> None:
     index, start, target, step_delay_ms = (
         int(value) for value in action.values
@@ -261,13 +354,16 @@ def _execute_sweep(
             step_delay_ms / 1000.0,
             label=label,
             output=output,
+            clock=clock,
         )
 
 
 def execute_old_sequence(
     stm32: Stm32Link,
     *,
+    drive_speed: float = DEFAULT_DRIVE_SPEED_M_S,
     output: Callable[[str], object] = print,
+    clock: Callable[[], float] = time.monotonic,
 ) -> None:
     """Execute every representable old action in exact source order."""
     for action in OLD_SEQUENCE:
@@ -280,6 +376,7 @@ def execute_old_sequence(
                 float(action.values[0]),
                 label=label,
                 output=output,
+                clock=clock,
             )
         elif action.kind is ActionKind.SERVO:
             index, angle = (int(value) for value in action.values)
@@ -299,9 +396,15 @@ def execute_old_sequence(
                 output=output,
             )
         elif action.kind is ActionKind.SERVO_SWEEP:
-            _execute_sweep(stm32, action, output=output)
+            _execute_sweep(stm32, action, output=output, clock=clock)
         elif action.kind is ActionKind.CHASSIS_DISTANCE:
-            _log_unsupported_chassis_action(action, output)
+            _drive_distance_open_loop(
+                stm32,
+                action,
+                drive_speed=drive_speed,
+                output=output,
+                clock=clock,
+            )
         else:  # pragma: no cover - protects future action-table edits
             raise RuntimeError(f"unsupported action kind: {action.kind}")
 
@@ -362,12 +465,14 @@ def run_test(
     input_fn: Callable[[str], str] = input,
     stm32_factory: Callable[[], Stm32Link] = _default_stm32_factory,
     output: Callable[[str], object] = print,
+    clock: Callable[[], float] = time.monotonic,
 ) -> int:
     """Run the manually confirmed live sequence."""
-    output("RoboGame 旧版抓放候选机械臂测试")
+    output("RoboGame 旧版抓放候选动作测试")
     output("WARNING: 本入口会驱动 Servo 和 Stepper，Stepper 没有回零/限位语义。")
-    output("WARNING: 请固定底盘、清空机构行程，并准备人工急停。")
-    output("WARNING: 三段旧版底盘定距动作只记录，不发送，也不用VEL替代。")
+    output("WARNING: 本入口也会驱动底盘；请清空场地并准备人工急停。")
+    output("WARNING: 距离由VEL时间估算，没有编码器反馈，必须实车测量误差。")
+    output(f"drive_speed={args.drive_speed:.2f} m/s")
     _print_plan(output)
 
     if args.dry_run:
@@ -390,7 +495,12 @@ def run_test(
             output=output,
             require_ack=True,
         )
-        execute_old_sequence(stm32, output=output)
+        execute_old_sequence(
+            stm32,
+            drive_speed=args.drive_speed,
+            output=output,
+            clock=clock,
+        )
         _request_stop(
             stm32,
             label="完成保护",
