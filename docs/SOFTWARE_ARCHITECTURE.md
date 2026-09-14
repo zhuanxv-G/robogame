@@ -220,7 +220,7 @@ LINE_START
 
 该入口不导入或调用 NavigationController、TopologicalNavigator、Camera、K230D、Servo、Stepper 或任何底盘接口；连接后不执行握手、STOP、LINE_START、LINE_STOP 或 VEL，退出时只关闭串口。终端标记采用主线程中的 `select()` 等待，不创建串口读取线程；标记附在下一条采样记录上，因此仍保持单一阶段性回复读取者。CSV 的 `sensor_ok=0` 行会原样保留，但四路位只代表 STM32 缓存，分析时不得当作本次有效读数。`logs/` 已在 `.gitignore` 中忽略。
 
-这项工作建立了可重复的现场数据入口；多组 CSV 中的 `0110 -> 1110/1111 -> 0110` 已作为下面第一版状态机的真实依据。采样工具本身仍不执行任何动作。
+这项工作建立了可重复的现场数据入口；最初 CSV 中的 `0110 -> 1110/1111 -> 0110` 建立了第一版状态机，后续实车又确认右侧 T 可能出现 `0110 -> 0111`，因此现实现已补充对称的右侧候选。采样工具本身仍不执行任何动作。
 
 ### 3.3.3 第一版路口执行链
 
@@ -228,18 +228,21 @@ LINE_START
 Pi Stm32Link.set_next_turn(LEFT / RIGHT / STRAIGHT)
   -> NEXT_TURN,<turn> / ACK,NEXT_TURN,<turn>
   -> LINE_START（现有0.80 m/s Follow_Straight）
-  -> STM32连续3个约10 ms周期匹配1110或1111
+  -> STM32连续8个约10 ms周期匹配1110、0111或1111
   -> JUNCTION_DETECTED
-  -> 消费pending turn并发送TURN_STARTED,<turn>
-  -> 固定低速动作，离开宽线后进入REACQUIRE_LINE
-  -> 连续3周期重新读到0110
-  -> TURN_DONE,<turn>，恢复现有Follow_Straight
-  -> 再连续5周期0110后re-arm下一路口
+  -> 1110锁存LEFT，0111锁存RIGHT；歧义时读取pending LEFT/RIGHT
+  -> ADVANCE_TO_CENTER
+  -> TURN_STARTED,<LEFT|RIGHT>并按±0.80 rad/s定时转向
+  -> SEARCH_LINE保持相同转向方向
+  -> 连续3周期命中宽松线型
+  -> LINE_REACQUIRED + TURN_DONE,<LEFT|RIGHT>
+  -> 恢复0.80 m/s Follow_Straight
+  -> 3000 ms cooldown后重新等待20周期0110完成arming
 ```
 
-候选逻辑只接受 `s1=s2=s3=1`（即 1110/1111），不会把 `0000` 当路口。LEFT/RIGHT 沿已确认坐标分别使用正/负 omega；STRAIGHT 仅以低速前进，不理解场地是否真的有直行出口。没有 pending turn 时立即急停并上报 `ERR,NO_PENDING_TURN`。动作离开宽线和重捕线分别有 1200 ms、2000 ms timeout，超时急停并上报 `ERR,TURN_TIMEOUT` 或 `ERR,REACQUIRE_TIMEOUT`。这些动作速度、时间与连续周期都集中为 LineNav 常量，尚待实车标定。
+候选逻辑接受“左三路全黑或右三路全黑”，即物理 `1110/0111/1111`，不会把 `0000` 当路口。连续候选内的方向证据会锁存，所以 `0111 -> 1111` 仍保持 RIGHT；全黑或左右证据冲突时优先使用 pending LEFT/RIGHT，没有可用预设则保留旧 LEFT 回退。LEFT/RIGHT 分别使用正/负 omega，当前两边都沿用 11.5 s 的 90°实测时间；搜索阶段保持相同符号。重捕宽松线型 2000 ms 超时会急停并上报 `ERR,REACQUIRE_TIMEOUT`。速度、时间和连续周期均集中为常量，右转仍待烧录和实车标定。
 
-Pi 已在独立纯软件层把 BFS 节点路线转换成路口动作，但没有接入 CompetitionRunner。`tests/test_junction_turn.py` 可直接使用 `--turn ...`，也可使用 `--start ... --target ...` 规划并打印完整 route/actions；路线从路口起步时还要求 `--heading ...`。两种模式都只取第一个动作，只有操作者输入严格大写 `START` 后才连接 STM32、预设动作并启动巡线。`TURN_DONE` 后入口要求 STOP ACK 并退出；timeout、`NO_PENDING_TURN`、Ctrl+C 或其他异常也会进入 FAULT/清理 STOP，不会自动连续运行第二个路口。
+Pi 已在独立纯软件层把 BFS 节点路线转换成路口动作，但没有接入 CompetitionRunner。`tests/test_junction_turn.py` 可直接使用 `--turn ...`，也可使用 `--start ... --target ...` 规划并打印完整 route/actions；路线从路口起步时还要求 `--heading ...`。两种模式都只取第一个动作，只有操作者输入严格大写 `START` 后才连接 STM32、预设动作并启动巡线。`TURN_DONE` 后入口要求 STOP ACK 并退出；timeout、方向不匹配、Ctrl+C 或其他异常也会进入 FAULT/清理 STOP，不会自动连续运行第二个路口。
 
 ### 3.3.4 多路口路线执行链
 
@@ -451,7 +454,7 @@ LEFT_ORANGE_MATERIAL
 
 `TOPOLOGY_EDGE_DIRECTIONS` 只保存图 3.8/3.9 和项目坐标约定支持的离散方向：三段灰廊连接向东；启动线、两侧材料竖线向北；屋顶线从屋顶 T 至紫色材料区向西。解析器自动得到反向边。`RouteActionResolver` 比较入边与出边方向，只在 `kind=junction` 节点生成动作：同向为 `STRAIGHT`，逆时针 90° 为 `LEFT`，顺时针 90° 为 `RIGHT`。缺失元数据、非路口转向和 180° 掉头均抛出 `RouteActionUnknownError`，绝不默认直行。路线若从路口开始，必须额外传入当前 heading；否则第一条边没有可靠的入向。
 
-TopologicalNavigator 和 RouteActionResolver 仍只进行纯数据转换，不导入 STM32、相机或任务状态。RouteExecutor 位于其上层：只在显式 start 后通过注入的 Stm32Link 逐路口调度 pending turn，再把最终到站交回 NavigationController。STM32 仍只检测路口并执行已经预设的单个 pending turn，不理解 route。当前这条连续路线链只接入独立人工入口，尚未接入 CompetitionRunner。
+TopologicalNavigator 和 RouteActionResolver 仍只进行纯数据转换，不导入 STM32、相机或任务状态。RouteExecutor 位于其上层：只在显式 start 后通过注入的 Stm32Link 逐路口调度 pending turn，再把最终到站交回 NavigationController。STM32 不理解 route；它根据 `1110/0111` 的侧向证据选择 LEFT/RIGHT，并在全黑或证据冲突时使用 pending LEFT/RIGHT 消歧。当前这条连续路线链只接入独立人工入口，尚未接入 CompetitionRunner。
 
 ## 6. 串口所有权
 
