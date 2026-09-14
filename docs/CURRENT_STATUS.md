@@ -132,6 +132,7 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 | 巡线到拓扑人工联调 | Tag 3/4/5 已有实机成功记录 | `test_navigation_topology_live.py` 只在人工输入 START 后连接一个 Stm32Link 和一个 AprilTagService；ARRIVED 后才把目标 Tag 写入 TopologicalNavigator，并新增可选 `--stop-debug` 事务时间线 |
 | 巡线传感器现场采样 | 只读工具完成，已有真实 CSV | `test_line_sensor_capture.py` 约 10 Hz 发送唯一允许命令 `LINE_STATUS`；多组 T 字路口样本已确认 0110/1110/1111，工具不启动巡线或任何执行器 |
 | 路口协议与人工入口 | 软件完成，待烧录/实车 | `test_junction_turn.py` 支持直接指定动作，或由 start/target 规划路线并只取首个动作；严格输入 `START` 后才连接，`TURN_DONE` 后 STOP，不会连续跑多个路口 |
+| 巡线到抓取墙测试 | Pi 入口完成，受当前固定左转固件阻塞 | `test_line_to_wall.py` 使用现有协议执行启动 STOP、预设 RIGHT、LINE_START、等待首个 `JUNCTION_DETECTED` 和 `LINE_REACQUIRED`，再保持 LINE_FOLLOW 约 3.22 s 后 LINE_STOP；不使用视觉、机械臂或 REMOTE VEL |
 | competition 流程调度 | 第一版模拟流程完成 | `CompetitionRunner` 通过外部事件串联巡线、橙色目标接近、抓取、搭建和结束；默认 simulation mode 不调用硬件控制器 |
 | 机械臂任务控制 | 骨架完成，橙色抓取待确认 | `TaskController.build()` 复用 `ArmSequence.run_all()`，`reset_arm()` 复用 `safe_home()`；静态考古发现一个禁用的旧抓取候选，但不足以确认其颜色、存放目标和当前实机有效性 |
 | 比赛入口 | 安全模拟入口完成 | `python -m competition.main` 初始化 CompetitionRunner，默认只打印 simulation/START 及子控制器状态，不连接或运行任何硬件 |
@@ -406,6 +407,31 @@ python3 tests/test_multi_junction_route.py \
 
 运行输出会依次标出当前 `action i/n`、`JUNCTION_DETECTED`、`TURN_STARTED,...`、`TURN_DONE,...`、`ALL JUNCTION ACTIONS DONE`、`SEARCHING TARGET TAG`、`TAG ... ARRIVED` 和 `ROUTE FINISHED`。只有目标 Tag 连续达标并收到 STOP ACK、拓扑位置更新成功后才会完成。Ctrl+C、watchdog、协议/相机异常和状态错序都会尝试 STOP 并释放相机与串口；完成路径依赖 NavigationController 已确认的 STOP ACK 保持停车。该入口尚未进行多路口实车验证，也没有接入 CompetitionRunner。
 
+### 6.4.4 巡线到抓取墙人工入口
+
+新增独立入口：
+
+```bash
+python3 tests/test_line_to_wall.py --dry-run
+python3 tests/test_line_to_wall.py
+```
+
+实机命令只有在操作者严格输入大写 `START` 后才连接 STM32，单次执行以下流程，不自动循环：
+
+```text
+STOP / ACK
+  -> NEXT_TURN,RIGHT / ACK
+  -> LINE_START / ACK
+  -> JUNCTION_DETECTED
+  -> 等待 LINE_REACQUIRED
+  -> 保持 STM32 LINE_FOLLOW，不发送 VEL，也不重复 LINE_START
+  -> 0.38 / 0.118 = 3.22 s 后 LINE_STOP / ACK
+```
+
+`TARGET_DISTANCE = 0.38`、`REAL_SPEED = 0.118` 和 `LINE_DURATION = TARGET_DISTANCE / REAL_SPEED` 集中定义在脚本顶部；没有写死 `sleep(3.2)`。从收到 `LINE_REACQUIRED` 的时刻开始计时，计时期间仍持续读取串口，任意 `ERR,...`、通信异常、错误的转向方向或意外第二个 `JUNCTION_DETECTED` 都进入故障清理并尝试全局 STOP。Ctrl+C 同样请求 STOP；正常完成则以 `LINE_STOP` ACK 确认停车，并只输出抓取准备就绪标记，不执行机械臂动作。入口不导入 AprilTag、K230D 或机械臂代码，也没有修改 `main_controller_align.py`、competition 状态机、既有巡线逻辑或 STM32 协议。
+
+重要兼容性限制：当前项目记录的外部 STM32 源码仍把单 T 动作固定为 `LEFT`，不消费 `NEXT_TURN,RIGHT`。脚本会校验 `TURN_STARTED` / `TURN_DONE` 必须为 `RIGHT`，因此在该固件上会安全报错并 STOP，而不能完成本测试。Pi 脚本本身不要求重新烧录；但要实车完成“右转到墙”，必须另行获得能执行现有 `NEXT_TURN,RIGHT` 的 STM32 固件并重新烧录。本任务没有修改或烧录 STM32。
+
 ### 6.5 STM32 入口
 
 STM32 不在本 Git 仓库中。当前外部源码入口为 `D:\Code\V1.3_vision\V1.3\Core\Src\main.c`，Keil 工程为 `D:\Code\V1.3_vision\V1.3\MDK-ARM\f407_ustc_2022_robogame.uvprojx`。2026-09-12 的路口状态机版本已使用 ARMCC V5 全量重编译，结果为 0 error、1 个原有 `Test_All` 未引用警告；没有自动烧录或运行。
@@ -438,7 +464,7 @@ STM32 不在本 Git 仓库中。当前外部源码入口为 `D:\Code\V1.3_vision
 
 AprilTag 两个旧脚本同样是相机人工测试，不包含断言。`test_line_to_tag.py`、`test_navigation_topology_live.py`、`test_junction_turn.py` 和 `test_multi_junction_route.py` 都是带人工启动确认且会驱动底盘的实机入口，不能由自动测试调用。`test_old_grab_sequence.py` 只有在严格输入 `START` 后才驱动底盘、Servo 和 Stepper，并在启动、每段定时距离结束、Ctrl+C、ERR、异常和正常完成路径请求 STOP；它也不能由自动测试调用。`test_line_sensor_capture.py` 只允许 `LINE_STATUS`，不会驱动任何执行器，但会打开真实 STM32 串口，仍需人工单独运行。
 
-`test_route_executor_unit.py` 使用四类 Fake 覆盖两/三动作严格推进、方向不匹配、重复事件、Pi watchdog、全部路口完成但未到站、最终 ARRIVED 后拓扑更新、NavigationController FAULT、AprilTag 异常、STM32 协议错误、空 route 和零路口路线。`test_multi_junction_route_unit.py` 确认未输入严格 `START` 时 STM32/Camera factory 均不会调用。`test_navigation_controller_unit.py` 新增确认最后路口交接不会重复发送 `LINE_START`。其他既有 Fake 测试继续覆盖 resolver、拓扑、Junction 协议、传感器和 STOP；所有单元测试都不连接硬件。
+`test_route_executor_unit.py` 使用四类 Fake 覆盖两/三动作严格推进、方向不匹配、重复事件、Pi watchdog、全部路口完成但未到站、最终 ARRIVED 后拓扑更新、NavigationController FAULT、AprilTag 异常、STM32 协议错误、空 route 和零路口路线。`test_multi_junction_route_unit.py` 确认未输入严格 `START` 时 STM32/Camera factory 均不会调用。`test_navigation_controller_unit.py` 新增确认最后路口交接不会重复发送 `LINE_START`。`test_line_to_wall_unit.py` 使用 Fake STM32/时钟覆盖距离公式、无需硬件的 dry-run、严格 START、单次 RIGHT 路口流程、计时期间保持 LINE_FOLLOW、错误方向、ERR 和 Ctrl+C STOP；不会连接或驱动实机。其他既有 Fake 测试继续覆盖 resolver、拓扑、Junction 协议、传感器和 STOP；所有单元测试都不连接硬件。
 
 ## 8. 当前未完成任务和已知缺口
 
