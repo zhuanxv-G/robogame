@@ -264,6 +264,26 @@ class GrabMissionTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertEqual(calls, 0)
 
+    def test_main_connects_the_link_it_created_before_running(self) -> None:
+        clock = FakeClock()
+        link = FakeStm32Link(clock, list(JUNCTION_LINES))
+
+        with mock.patch("competition.grab_mission.grab_orange") as grab_spy:
+            result = main(
+                [],
+                stm32_factory=lambda: link,  # type: ignore[arg-type]
+                input_fn=lambda prompt: "START",
+                output=lambda line: None,
+                clock=clock,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertIn("connect", link.calls)
+        grab_spy.assert_called_once()
+        # main closes the link it created, even on the success path.
+        self.assertEqual(link.calls[-1], "close")
+        self.assertFalse(link.is_connected)
+
 
 if __name__ == "__main__":
     unittest.main()

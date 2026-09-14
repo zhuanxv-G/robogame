@@ -488,6 +488,8 @@ def main(
     try:
         output("Connecting STM32...")
         stm32 = stm32_factory()
+        stm32.connect()
+        output("STM32 connected")
         run_grab_mission(stm32, output=output, clock=clock)
         return 0
     except KeyboardInterrupt:
