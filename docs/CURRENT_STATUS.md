@@ -31,6 +31,7 @@ robogame/
 │   ├── mission_controller.py      # 仅管理状态的基础控制器
 │   ├── competition_runner.py      # 事件驱动的第一版比赛流程调度
 │   ├── task_controller.py         # 复用已验证机械臂动作的任务接口
+│   ├── grab_task.py                # Pi端封装已验证旧版抓取动作，接口 grab_orange()
 │   ├── visual_approach_controller.py # K230 对准、接近和 READY 判断
 │   ├── navigation_controller.py   # 巡线启动与 Tag 观测导航抽象层
 │   └── main.py                    # 不连接硬件的未来比赛入口骨架
@@ -116,7 +117,7 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 | STM32 通信抽象层 | 骨架完成，未实机回归 | `Stm32Link` 封装 HELLO_STM32、STOP、VEL、NEXT_TURN、路口事件、Servo/Stepper，并要求显式 `connect()` |
 | STM32 底盘、电机、巡线 | 直线可用，左右 T 待烧录实测 | 普通巡线 PID、0.80 m/s 速度和传感器读取未改；路口门控使用 1500 ms 启动保护、`0110` 连续 20 次 arming、`1110/0111/1111` 连续 8 次确认和 3000 ms cooldown。`1110` 锁存 LEFT、`0111` 锁存 RIGHT，左右均按 11.5 s 转向并同向搜索重捕 |
 | Servo、Stepper、机械臂 | 动作层已验证 | `ArmSequence` 可复用，三组搭建动作和安全 HOME 已保留；不要改动参数 |
-| 旧抓放候选测试 | 软件入口完成，待实机 | `test_old_grab_sequence.py` 按旧 `main.c:214-248` 的 27 步顺序执行 Servo/Stepper 和三段底盘距离动作；STM32 `VEL.Y` 上限已放宽至 ±0.80，脚本默认发送 ±0.80，并按巡线实测 0.118 m/s 分开估算时间，每段结束立即 STOP |
+| 旧抓放候选测试 | 机械臂部分已实机验证，底盘段待实机 | `test_old_grab_sequence.py` 按旧 `main.c:214-248` 的 27 步顺序执行 Servo/Stepper 和三段底盘距离动作；其机械臂部分已在实机验证动作正常（2026-09-14 确认），底盘三段仍是 VEL 开环时间估算，保持原样不作正式封装 |
 | K230D 物块视觉 | 单项检测已验证 | 当前主控能解析目标并完成对准/接近；完整橙色、紫色任务切换尚未接入 |
 | K230D 接口层 | 骨架完成，未实机回归 | `K230Link` 封装连接生命周期、现有 `TARGET` / `NO_TARGET` 解析格式和最新消息读取 |
 | K230D 对准到搭建 | 第一版已接通 | `main_controller_align.py` 可从 ALIGN/APPROACH 到 READY，再经人工 `b` 确认执行 ARM_BUILD |
@@ -135,9 +136,9 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 | 路口协议与人工入口 | 软件完成，待烧录/实车 | `test_junction_turn.py` 支持直接指定动作，或由 start/target 规划路线并只取首个动作；严格输入 `START` 后才连接，`TURN_DONE` 后 STOP，不会连续跑多个路口 |
 | 巡线到抓取墙测试 | Pi 入口完成，待烧录/实车 | `test_line_to_wall.py` 使用现有协议执行启动 STOP、预设 RIGHT、LINE_START、等待首个 `JUNCTION_DETECTED` 和 `LINE_REACQUIRED`，再保持 LINE_FOLLOW 约 3.22 s 后 LINE_STOP；STM32 已补上 `0111 -> RIGHT`，尚未烧录 |
 | competition 流程调度 | 第一版模拟流程完成 | `CompetitionRunner` 通过外部事件串联巡线、橙色目标接近、抓取、搭建和结束；默认 simulation mode 不调用硬件控制器 |
-| 机械臂任务控制 | 骨架完成，橙色抓取待确认 | `TaskController.build()` 复用 `ArmSequence.run_all()`，`reset_arm()` 复用 `safe_home()`；静态考古发现一个禁用的旧抓取候选，但不足以确认其颜色、存放目标和当前实机有效性 |
+| 机械臂任务控制 | 橙色抓取已封装，待接入控制器 | `TaskController.build()` 复用 `ArmSequence.run_all()`，`reset_arm()` 复用 `safe_home()`；新增 `competition/grab_task.py` 把已实机验证的旧版机械臂抓取动作封装为 `grab_orange()`，`TaskController.grab_orange()` 保持 NotImplemented，接线留待后续 |
 | 比赛入口 | 安全模拟入口完成 | `python -m competition.main` 初始化 CompetitionRunner，默认只打印 simulation/START 及子控制器状态，不连接或运行任何硬件 |
-| 完整比赛闭环 | 未完成 | Runner 已串起第一版橙色任务模拟流程，但没有真实事件、可执行橙色抓取、紫色任务或 live 生命周期 |
+| 完整比赛闭环 | 未完成 | Runner 已串起第一版橙色任务模拟流程；可执行橙色抓取动作已由 `competition/grab_task.py` 提供但未接入 Runner，真实事件、紫色任务和 live 生命周期仍缺失 |
 
 ## 6. 当前代码入口
 
@@ -197,6 +198,8 @@ delay 500 ms
 - Stepper 只有相对步数，没有原点、限位或编码器。旧候选本身不执行 `startup_raise()`；`build_sequence.py` 固定先执行 -1500 steps @ 800 pps，而 `main_controller_align.py` 默认关闭该动作，两个入口的起始高度并不等价。
 
 因此 `TaskController.grab_orange()` 继续返回 `NotImplemented`，CompetitionRunner 也继续在非模拟 `GRAB_ORANGE` 阶段阻塞。继续实现前至少需要：实机记录或操作者确认旧候选的任务语义；确认其中三段底盘动作是否属于不可分割的已验证顺序；确认动作开始时的 Servo 姿态和 Stepper 机械高度；确认 -1500 @ 800 pps 是否应在该流程前且仅执行一次；以及确认当前实机/固件仍对应这套参数。
+
+2026-09-14 后续：`tests/test_old_grab_sequence.py` 的机械臂动作已在实机验证动作正常。据此新增 `competition/grab_task.py`，把旧候选的纯机械臂部分（Servo/Stepper/延时，共 22 步，Servo 角度、Stepper 步数与 pps、延时和顺序与测试脚本完全一致）正式封装为 `grab_orange()`。三段底盘 `Robot.Move_Distance` 不在模块内：它们属于巡线/导航的定位职责，且测试中只是 VEL 开环时间估算而非已验证动作。模块自带启动/结束 STOP、执行中 ERR/Ctrl+C/异常即时 STOP 和分阶段动作日志；可以自建自关 `Stm32Link`，也可以复用调用方已连接的连接。`TaskController.grab_orange()` 仍返回 `NotImplemented`，本轮未接线。
 
 当前 VisualApproachController 的真实能力边界：
 
@@ -297,6 +300,17 @@ python3 tests/test_old_grab_sequence.py \
 `--dry-run` 只打印旧 27 步动作表，不打开串口。实机入口必须输入严格的 `START` 才连接；连接后的第一条命令为 `STOP` 并等待 ACK，随后按原顺序使用 `SERVO_SET`、`STEPPER_MOVE` 和 `VEL`，正常结束再次 `STOP`。每条命令分别打印发送、ACK 和 DONE；`SERVO_SET`、`VEL`、`STOP` 的现有协议没有 DONE，日志会明确标记为不适用，`STEPPER_MOVE` 则必须收到真实 `STEPPER_MOVE_DONE`。Ctrl+C、任意 `ERR` 或其他异常都会优先请求 `STOP` 再退出。
 
 脚本保留旧 `main.c:214-248` 的全部 27 个源码步骤及原延时。UART 语法不变，STM32 只把 `VEL.Y` 合法范围从 ±0.30 放宽到 ±0.80；三段 `Move_Distance` 仍由 Pi 每 100 ms 刷新 `VEL` 并按时间估算。脚本默认发送 ±0.80 命令值，计时则使用独立的前进/后退实测速度参数；以目前唯一可用的巡线实测基线 0.118 m/s 计算，+0.50 m、-0.05 m、-0.30 m 分别持续约 4.24 s、0.42 s、2.54 s，每段结束发送 STOP 并等待 ACK。后退暂沿用前进基线，必须单独实测后更新；该实现不是旧版编码器闭环，实际行程仍会受加减速、打滑、负载和通信延迟影响。旧固件未烧录新上限时会返回 `ERR,VEL`，脚本随后立即 STOP。该入口不表示完整抓放候选或颜色/箱位语义已经验证，也没有修改或复用 `ArmSequence` 的既有搭建动作。
+
+#### 6.3.2 正式抓取任务模块入口
+
+```bash
+python3 -m competition.grab_task --dry-run
+python3 -m competition.grab_task
+```
+
+`competition/grab_task.py` 是旧候选机械臂部分的正式封装，动作表与 `test_old_grab_sequence.py` 保持一致（Servo 角度、Stepper 步数/pps、延时、顺序完全一致）且不再包含底盘三段。`--dry-run` 只打印动作表，不打开串口。实机入口必须输入严格 `START` 才连接；连接后的第一条命令为 `STOP` 并等待 ACK，随后按 Prepare arm → Lower arm → Close gripper → Lift arm → Move to box 阶段输出动作日志，正常结束再次 `STOP`。Ctrl+C、任意 `ERR`、串口异常都会优先请求 `STOP` 再退出。
+
+函数接口为 `grab_orange(stm32=None, *, output=print)`：不传连接时自建自关 `Stm32Link`；传入已连接的 `Stm32Link` 时复用它且不关闭，供未来 mission_controller 与巡线共用同一条串口连接。外部只需调用一次，模块负责完整抓取动作与安全收尾。
 
 ### 6.4 视觉与导航人工测试入口
 
@@ -497,7 +511,7 @@ AprilTag 两个旧脚本同样是相机人工测试，不包含断言。`test_li
 3. 当前 STM32 直线巡线和独立脚本的 ARRIVED→拓扑更新已完成 Tag 3/4/5 第一轮现场验证；新增 `0111 -> RIGHT`、方向锁存和 Pi `test_line_to_wall.py` 组合仅完成软件测试与编译，尚未烧录/实车。STRAIGHT 动作状态仍未在当前 STM32 非阻塞状态机中恢复。早前 Tag 5 偶发 STOP ACK timeout 的诊断能力继续保留，后续实测暂未复现，根因尚未确认。
 4. 世界模型已有无坐标逻辑图和离散转向，但仍缺少六个 Tag 中心 `(x, y, yaw)`、黑线节点/线段长度和关键停车点实测值；当前不能生成距离动作或基于坐标的轨迹。
 5. AprilTag 目前只有像素误差和像素面积，没有相机内参、畸变校正或姿态估计；到站控制器只增加连续帧确认，`arrival_area` 仍需按实际停车距离标定。近距离 Tag 移出画面后的专用安全判定尚未实现。
-6. K230D 的橙色、紫色检测结果如何触发取料尚未定义；TaskController 已有接口，但现有 ArmSequence 没有经过确认的独立橙色/紫色抓取动作。STM32 `Test_All()` 中虽有一个禁用的“±3000/±5000 + 底盘移动”旧候选，但缺少颜色/存放语义、调用证据、起始高度和实机版本确认，不能直接采用。
+6. K230D 的橙色、紫色检测结果如何触发取料尚未定义；旧候选的机械臂部分已实机验证并封装为 `competition/grab_task.py` 的 `grab_orange()`，但 `TaskController`/`CompetitionRunner` 尚未接线，紫色抓取仍没有经过确认的动作。底盘定位由巡线链路负责，尚未与抓取组成完整闭环。
 7. 新增链路层已引用 `config.py`；旧主控和部分诊断脚本仍复制路径或使用 `/dev/ttyUSB*` 等易漂移路径。
 8. 没有 `requirements.txt` 或其他依赖锁定文件。已知 Pi 环境包含 `pyserial`、`numpy`、`opencv-python-headless` 和 `pupil_apriltags`，但版本没有记录。
 9. `main_controller_align.py` 在模块顶层打开串口，且主 `try/finally` 在串口打开和启动等待之后才开始；它不适合被其他模块 import。
