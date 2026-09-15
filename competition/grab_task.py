@@ -41,7 +41,7 @@ from hardware.stm32_link import (  # noqa: E402
 )
 
 
-# Verified action parameters retained from tests/test_old_grab_sequence.py.
+# Verified arm-action parameters retained from tests/test_old_grab_sequence.py.
 ACK_TIMEOUT_S = 2.0
 STEPPER_PPS = 800
 ACTION_DELAY_S = 0.5
@@ -68,7 +68,7 @@ class ArmStep:
     source: str
 
 
-GRAB_SEQUENCE: tuple[ArmStep, ...] = (
+PREPARE_ARM_STEPS: tuple[ArmStep, ...] = (
     # --- Prepare arm (old candidate: Servo[1..3] setup + HAL_Delay) ---
     ArmStep("Prepare arm", ArmStepKind.DELAY, (ACTION_DELAY_S,),
             "HAL_Delay(500)"),
@@ -80,6 +80,16 @@ GRAB_SEQUENCE: tuple[ArmStep, ...] = (
             "Servo[4].Set_Angle(135)"),
     ArmStep("Prepare arm", ArmStepKind.DELAY, (ACTION_DELAY_S,),
             "HAL_Delay(500)"),
+)
+
+# These two waits were old steps 8 and 18.  They remain explicit even though
+# the chassis moves immediately before them are owned by grab_mission.py.
+PRE_PICK_SETTLE_STEPS: tuple[ArmStep, ...] = (
+    ArmStep("Settle after backoff", ArmStepKind.DELAY, (ACTION_DELAY_S,),
+            "HAL_Delay(500)"),
+)
+
+PICK_ARM_STEPS: tuple[ArmStep, ...] = (
     # --- Lower arm ---
     ArmStep("Lower arm", ArmStepKind.STEPPER, (3000, STEPPER_PPS),
             "Stepper.Move_Blocking(3000, 800)"),
@@ -99,25 +109,44 @@ GRAB_SEQUENCE: tuple[ArmStep, ...] = (
             "Stepper.Move_Blocking(-3000, 800)"),
     ArmStep("Lift arm", ArmStepKind.DELAY, (ACTION_DELAY_S,),
             "HAL_Delay(500)"),
-    # --- Move to box (placement + release + retract) ---
-    ArmStep("Move to box", ArmStepKind.SERVO, (2, 0),
+)
+
+PRE_PLACE_SETTLE_STEPS: tuple[ArmStep, ...] = (
+    ArmStep("Settle after retreat", ArmStepKind.DELAY, (ACTION_DELAY_S,),
+            "HAL_Delay(500)"),
+)
+
+PLACE_ARM_STEPS: tuple[ArmStep, ...] = (
+    # --- Placement + release + retract ---
+    ArmStep("Place object", ArmStepKind.SERVO, (2, 0),
             "Servo[2].Set_Angle(0)"),
-    ArmStep("Move to box", ArmStepKind.SERVO_SWEEP, (1, 0, 93, 10),
+    ArmStep("Place object", ArmStepKind.SERVO_SWEEP, (1, 0, 93, 10),
             "Servo[1].Sweep_To(93, 10)"),
-    ArmStep("Move to box", ArmStepKind.DELAY, (ACTION_DELAY_S,),
+    ArmStep("Place object", ArmStepKind.DELAY, (ACTION_DELAY_S,),
             "HAL_Delay(500)"),
-    ArmStep("Move to box", ArmStepKind.STEPPER, (5000, STEPPER_PPS),
+    ArmStep("Place object", ArmStepKind.STEPPER, (5000, STEPPER_PPS),
             "Stepper.Move_Blocking(5000, 800)"),
-    ArmStep("Move to box", ArmStepKind.DELAY, (ACTION_DELAY_S,),
+    ArmStep("Place object", ArmStepKind.DELAY, (ACTION_DELAY_S,),
             "HAL_Delay(500)"),
-    ArmStep("Move to box", ArmStepKind.SERVO, (4, 135),
+    ArmStep("Place object", ArmStepKind.SERVO, (4, 135),
             "Servo[4].Set_Angle(135)"),
-    ArmStep("Move to box", ArmStepKind.DELAY, (ACTION_DELAY_S,),
+    ArmStep("Place object", ArmStepKind.DELAY, (ACTION_DELAY_S,),
             "HAL_Delay(500)"),
-    ArmStep("Move to box", ArmStepKind.STEPPER, (-5000, STEPPER_PPS),
+    ArmStep("Place object", ArmStepKind.STEPPER, (-5000, STEPPER_PPS),
             "Stepper.Move_Blocking(-5000, 800)"),
-    ArmStep("Move to box", ArmStepKind.DELAY, (ACTION_DELAY_S,),
+    ArmStep("Place object", ArmStepKind.DELAY, (ACTION_DELAY_S,),
             "HAL_Delay(500)"),
+)
+
+# Every non-chassis source action, including the waits immediately following
+# the two omitted chassis moves, is represented in its original relative
+# order.  The integrated mission inserts its chassis moves at those boundaries.
+GRAB_SEQUENCE: tuple[ArmStep, ...] = (
+    PREPARE_ARM_STEPS
+    + PRE_PICK_SETTLE_STEPS
+    + PICK_ARM_STEPS
+    + PRE_PLACE_SETTLE_STEPS
+    + PLACE_ARM_STEPS
 )
 
 
@@ -126,10 +155,11 @@ def _guarded_delay(
     seconds: float,
     *,
     output: Callable[[str], object],
+    clock: Callable[[], float],
 ) -> None:
     """Wait while watching the serial stream for asynchronous ERR lines."""
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
+    deadline = clock() + seconds
+    while clock() < deadline:
         raw_line = stm32.readline()
         if not raw_line:
             continue
@@ -162,21 +192,33 @@ def _execute_step(
     step: ArmStep,
     *,
     output: Callable[[str], object],
+    clock: Callable[[], float],
 ) -> None:
     """Execute one verified arm step with the current transactional protocol."""
     if step.kind is ArmStepKind.DELAY:
         seconds = float(step.values[0])
         output(f"    Wait {seconds * 1000:.0f} ms")
-        _guarded_delay(stm32, seconds, output=output)
+        _guarded_delay(stm32, seconds, output=output, clock=clock)
     elif step.kind is ArmStepKind.SERVO:
         index, angle = (int(value) for value in step.values)
-        output(f"    Servo{index} -> {angle}")
-        stm32.servo_set(index, angle, timeout=ACK_TIMEOUT_S)
+        command = f"SERVO_SET,{index},{angle}"
+        output(f"    TX: {command}")
+        ack = stm32.servo_set(index, angle, timeout=ACK_TIMEOUT_S)
+        output(f"    RX ACK: {ack}")
+        output("    RX DONE: N/A (SERVO_SET defines ACK only)")
     elif step.kind is ArmStepKind.STEPPER:
         steps, pps = (int(value) for value in step.values)
-        sign = "+" if steps >= 0 else "-"
-        output(f"    Stepper {sign}{abs(steps)} @ {pps} pps")
-        stm32.stepper_move(steps, pps, ack_timeout=ACK_TIMEOUT_S)
+        command = f"STEPPER_MOVE,{steps},{pps}"
+        output(f"    TX: {command}")
+        stm32.send_command(command)
+        ack = stm32.wait_ack(command, ACK_TIMEOUT_S)
+        output(f"    RX ACK: {ack}")
+        nominal_seconds = abs(steps) / float(pps)
+        done = stm32.wait_done(
+            f"STEPPER_MOVE_DONE,{steps}",
+            nominal_seconds * 2.0 + 8.0,
+        )
+        output(f"    RX DONE: {done}")
     elif step.kind is ArmStepKind.SERVO_SWEEP:
         index, start, target, step_delay_ms = (
             int(value) for value in step.values
@@ -187,20 +229,55 @@ def _execute_step(
         )
         direction = 1 if target > start else -1
         for angle in range(start + direction, target + direction, direction):
-            stm32.servo_set(index, angle, timeout=ACK_TIMEOUT_S)
+            command = f"SERVO_SET,{index},{angle}"
+            output(f"    TX: {command}")
+            ack = stm32.servo_set(index, angle, timeout=ACK_TIMEOUT_S)
+            output(f"    RX ACK: {ack}")
+            output("    RX DONE: N/A (SERVO_SET defines ACK only)")
             _guarded_delay(
                 stm32,
                 step_delay_ms / 1000.0,
                 output=output,
+                clock=clock,
             )
     else:  # pragma: no cover - protects future table edits
         raise RuntimeError(f"unsupported arm step kind: {step.kind}")
+
+
+def execute_grab_steps(
+    stm32: Stm32Link,
+    steps: Sequence[ArmStep],
+    *,
+    output: Callable[[str], object] = print,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
+    """Execute a selected, ordered arm segment on an existing connection.
+
+    This lower-level entry does not send lifecycle STOP commands.  It lets the
+    mission insert the old 5 cm and 30 cm chassis moves at the exact boundaries
+    between the verified arm segments.  Callers retain responsibility for the
+    same exception-to-STOP safety wrapper used by :func:`grab_orange`.
+    """
+    if not stm32.is_connected:
+        raise Stm32NotConnectedError(
+            "supplied Stm32Link is not connected; call connect() first"
+        )
+
+    last_phase: str | None = None
+    for step in steps:
+        if step.phase != last_phase:
+            last_phase = step.phase
+            output("")
+            output(step.phase)
+            output("")
+        _execute_step(stm32, step, output=output, clock=clock)
 
 
 def grab_orange(
     stm32: Stm32Link | None = None,
     *,
     output: Callable[[str], object] = print,
+    clock: Callable[[], float] = time.monotonic,
 ) -> None:
     """Execute one complete orange grab-and-place with the verified arm.
 
@@ -237,14 +314,12 @@ def grab_orange(
         )
         output("    ACK,STOP")
 
-        last_phase: str | None = None
-        for step in GRAB_SEQUENCE:
-            if step.phase != last_phase:
-                last_phase = step.phase
-                output("")
-                output(step.phase)
-                output("")
-            _execute_step(stm32, step, output=output)
+        execute_grab_steps(
+            stm32,
+            GRAB_SEQUENCE,
+            output=output,
+            clock=clock,
+        )
 
         output("")
         output("Safety stop after sequence")

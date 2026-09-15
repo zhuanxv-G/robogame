@@ -28,5 +28,7 @@
 | `vel_test.py` | 人工验证 `VEL`、看门狗和 `STOP` | 使用 STM32 by-id，仍有实际硬件测试价值 |
 | `test_apriltag.py` | 持续检测并输出全部 AprilTag | 使用 `/dev/video0`，不连接 STM32、不驱动机器人 |
 | `test_localization.py` | 输出面积最大 Tag 的轻量定位信息 | 使用 `/dev/video0`，不连接 STM32、不驱动机器人 |
+| `test_grab_task_unit.py` | 无硬件核对旧抓放候选的24项非底盘动作与安全收尾 | 只使用 Fake STM32；不会打开串口或驱动机器人 |
+| `test_grab_mission_unit.py` | 无硬件验证巡线到墙、两段后退和抓放阶段顺序 | 明确禁止重复正向 VEL；只使用 Fake STM32 |
 
 `legacy/stepper_test.py` 没有放在这里，因为它使用 `STEPPER_SLOW` / `STEPPER_NUDGE`，与当前正式 `STEPPER_MOVE,<steps>,<pps>` 协议不一致。

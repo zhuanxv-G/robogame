@@ -10,7 +10,7 @@ RoboGame 是一套参加 RoboGame 2026 竞技组比赛的移动机器人系统�
 
 当前采用上下位机分工：Raspberry Pi 5 负责视觉结果处理、比赛状态和任务决策；STM32F407ZGT6 负责底盘、巡线、Servo 和 Stepper 的实时执行。K230D / CanMV 作为独立视觉协处理器，把目标检测结果发送给 Pi；Logitech C270 USB Camera 直接连接 Pi，用于 AprilTag 检测。
 
-项目已从单项硬件调试进入整车联调阶段，但还没有形成一条覆盖“启动—巡线—取橙色—取紫色—搭建”的全自动比赛主流程。2026-09-14 新增 `competition/grab_mission.py`（LINE_TO_GRAB_MISSION），在固定路线把巡线、T 字右转、定时到墙、后撤和橙色抓取串成第一条完整自动任务（代码完成，待烧录/实车）；AprilTag、K230D 和比赛完整策略仍未接入该任务。
+项目已从单项硬件调试进入整车联调阶段，但还没有形成一条覆盖“启动—巡线—取橙色—取紫色—搭建”的全自动比赛主流程。2026-09-14 新增、2026-09-15 修正 `competition/grab_mission.py`（LINE_TO_GRAB_MISSION）：固定路线按巡线 0.38 m 到墙、机械臂准备、后退 0.05 m、抓取、抓起后再后退 0.30 m、放置执行；已经消除重复向墙前进 0.38 m 的危险流程（代码完成，待烧录/实车）。AprilTag、K230D 和比赛完整策略仍未接入该任务。
 
 ## 2. 当前目录结构
 
@@ -136,7 +136,7 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 | 巡线传感器现场采样 | 只读工具完成，已有真实数据 | `test_line_sensor_capture.py` 约 10 Hz 发送唯一允许命令 `LINE_STATUS`；已确认普通线 `0110`、左侧扩宽 `1110`、右侧扩宽 `0111` 和全黑 `1111`，工具不启动任何执行器 |
 | 路口协议与人工入口 | 软件完成，待烧录/实车 | `test_junction_turn.py` 支持直接指定动作，或由 start/target 规划路线并只取首个动作；严格输入 `START` 后才连接，`TURN_DONE` 后 STOP，不会连续跑多个路口 |
 | 巡线到抓取墙测试 | Pi 入口完成，待烧录/实车 | `test_line_to_wall.py` 使用现有协议执行启动 STOP、预设 RIGHT、LINE_START、等待首个 `JUNCTION_DETECTED` 和 `LINE_REACQUIRED`，再保持 LINE_FOLLOW 约 3.22 s 后 LINE_STOP；STM32 已补上 `0111 -> RIGHT`，尚未烧录 |
-| 巡线到抓取完整任务 | Pi 入口完成，待烧录/实车 | `competition/grab_mission.py` 状态机串联 `test_line_to_wall.py` 巡线流程与 `grab_orange()`：抓取区 LINE_STOP 后按 VEL 定时 0.38 m 抵墙、后撤 0.05 m 再抓取；全程 STOP/ERR/Ctrl+C 安全收尾，未实车 |
+| 巡线到抓取完整任务 | Pi 入口完成，待烧录/实车 | `competition/grab_mission.py` 在重捕后保持巡线 0.38 m 到墙并 LINE_STOP，不再额外向墙前进；随后准备机械臂、后退 0.05 m、抓取、后退 0.30 m、放置。全程 STOP/ERR/Ctrl+C 安全收尾，未实车 |
 | competition 流程调度 | 第一版模拟流程完成 | `CompetitionRunner` 通过外部事件串联巡线、橙色目标接近、抓取、搭建和结束；默认 simulation mode 不调用硬件控制器 |
 | 机械臂任务控制 | 橙色抓取已封装，待接入控制器 | `TaskController.build()` 复用 `ArmSequence.run_all()`，`reset_arm()` 复用 `safe_home()`；新增 `competition/grab_task.py` 把已实机验证的旧版机械臂抓取动作封装为 `grab_orange()`，`TaskController.grab_orange()` 保持 NotImplemented，接线留待后续 |
 | 比赛入口 | 安全模拟入口完成 | `python -m competition.main` 初始化 CompetitionRunner，默认只打印 simulation/START 及子控制器状态，不连接或运行任何硬件 |
@@ -201,7 +201,7 @@ delay 500 ms
 
 因此 `TaskController.grab_orange()` 继续返回 `NotImplemented`，CompetitionRunner 也继续在非模拟 `GRAB_ORANGE` 阶段阻塞。继续实现前至少需要：实机记录或操作者确认旧候选的任务语义；确认其中三段底盘动作是否属于不可分割的已验证顺序；确认动作开始时的 Servo 姿态和 Stepper 机械高度；确认 -1500 @ 800 pps 是否应在该流程前且仅执行一次；以及确认当前实机/固件仍对应这套参数。
 
-2026-09-14 后续：`tests/test_old_grab_sequence.py` 的机械臂动作已在实机验证动作正常。据此新增 `competition/grab_task.py`，把旧候选的纯机械臂部分（Servo/Stepper/延时，共 22 步，Servo 角度、Stepper 步数与 pps、延时和顺序与测试脚本完全一致）正式封装为 `grab_orange()`。三段底盘 `Robot.Move_Distance` 不在模块内：它们属于巡线/导航的定位职责，且测试中只是 VEL 开环时间估算而非已验证动作。模块自带启动/结束 STOP、执行中 ERR/Ctrl+C/异常即时 STOP 和分阶段动作日志；可以自建自关 `Stm32Link`，也可以复用调用方已连接的连接。`TaskController.grab_orange()` 仍返回 `NotImplemented`，本轮未接线。
+2026-09-14 后续：`tests/test_old_grab_sequence.py` 的机械臂动作已在实机验证动作正常。据此新增 `competition/grab_task.py`。2026-09-15 复核发现初版在剔除三段底盘动作时误删了旧步骤 8、18 的两个 500 ms 等待，现已补回；模块当前包含全部 24 个非底盘源码动作，Servo 角度、Stepper 步数/pps、延时和相对顺序均由单元测试与旧动作表逐项比较。模块自带启动/结束 STOP、执行中 ERR/Ctrl+C/异常即时 STOP，并逐命令记录 TX、ACK 和 DONE（Servo 的 DONE 明确标为协议不适用）。它可以自建自关 `Stm32Link`，也可以复用调用方已连接的连接。`TaskController.grab_orange()` 仍返回 `NotImplemented`，没有接入 CompetitionRunner。
 
 当前 VisualApproachController 的真实能力边界：
 
@@ -310,9 +310,9 @@ python3 -m competition.grab_task --dry-run
 python3 -m competition.grab_task
 ```
 
-`competition/grab_task.py` 是旧候选机械臂部分的正式封装，动作表与 `test_old_grab_sequence.py` 保持一致（Servo 角度、Stepper 步数/pps、延时、顺序完全一致）且不再包含底盘三段。`--dry-run` 只打印动作表，不打开串口。实机入口必须输入严格 `START` 才连接；连接后的第一条命令为 `STOP` 并等待 ACK，随后按 Prepare arm → Lower arm → Close gripper → Lift arm → Move to box 阶段输出动作日志，正常结束再次 `STOP`。Ctrl+C、任意 `ERR`、串口异常都会优先请求 `STOP` 再退出。
+`competition/grab_task.py` 是旧候选机械臂部分的正式封装，动作表包含旧序列中全部 24 个非底盘动作，也保留原本紧跟 0.05 m、0.30 m 底盘动作后的两个 500 ms 等待。`--dry-run` 只打印动作表，不打开串口。实机入口必须输入严格 `START` 才连接；连接后的第一条命令为 `STOP` 并等待 ACK，动作日志逐项打印 TX、ACK 和 DONE，正常结束再次 `STOP`。Ctrl+C、任意 `ERR`、串口异常都会优先请求 `STOP` 再退出。
 
-函数接口为 `grab_orange(stm32=None, *, output=print)`：不传连接时自建自关 `Stm32Link`；传入已连接的 `Stm32Link` 时复用它且不关闭，供未来 mission_controller 与巡线共用同一条串口连接。外部只需调用一次，模块负责完整抓取动作与安全收尾。
+函数接口为 `grab_orange(stm32=None, *, output=print, clock=time.monotonic)`：不传连接时自建自关 `Stm32Link`；传入已连接的 `Stm32Link` 时复用它且不关闭。`clock` 只用于无硬件确定性测试，实车默认使用单调时钟。独立入口负责机械臂动作与安全收尾；固定路线任务则调用分段接口，在原位置插入底盘后退动作。
 
 ### 6.4 视觉与导航人工测试入口
 
@@ -458,7 +458,7 @@ python3 -m competition.grab_mission
 
 `competition/grab_mission.py` 把已分别验证的巡线、路口和机械臂模块连接为第一条固定路线完整任务，不修改任何已有模块、测试脚本或 STM32 固件。`--dry-run` 只打印流程和参数，不打开串口；实机入口必须输入严格 `START` 才连接，单次执行后不自动循环。
 
-状态机依次为 `IDLE -> LINE_FOLLOW -> WAIT_JUNCTION -> TURNING -> LINE_REACQUIRED -> APPROACH_WALL -> BACKOFF -> GRAB -> DONE`；任意串口异常、STM32 `ERR`、协议错序或 Ctrl+C 进入 `ERROR`，先请求全局 STOP 再重新抛出。
+状态机依次为 `IDLE -> LINE_FOLLOW -> WAIT_JUNCTION -> TURNING -> LINE_REACQUIRED -> PREPARE_ARM -> BACKOFF -> PICK -> RETREAT -> PLACE -> DONE`；任意串口异常、STM32 `ERR`、协议错序或 Ctrl+C 进入 `ERROR`，先请求全局 STOP 再重新抛出。
 
 ```text
 STOP / ACK
@@ -466,13 +466,15 @@ STOP / ACK
   -> LINE_START / ACK
   -> JUNCTION_DETECTED
   -> TURN_STARTED,RIGHT -> TURN_DONE,RIGHT + LINE_REACQUIRED（两者顺序兼容，方向严格校验）
-  -> 保持 LINE_FOLLOW 约 3.22 s 到达抓取区 -> LINE_STOP / ACK
-  -> VEL,0.00,0.80,0.00 每 100 ms 刷新约 3.22 s（REMOTE 看门狗 1000 ms）-> STOP / ACK（抵墙）
-  -> VEL,0.00,-0.80,0.00 后撤约 0.42 s（0.05 m）-> STOP / ACK
-  -> grab_orange()（复用同一条 Stm32Link，模块自带前后 STOP）
+  -> 保持 LINE_FOLLOW 约 3.22 s、共 0.38 m 到墙 -> LINE_STOP / ACK
+  -> 执行旧步骤 1-5 的机械臂准备
+  -> VEL,0.00,-0.80,0.00 后撤约 0.42 s（0.05 m）-> STOP / ACK -> 等待 500 ms
+  -> 下降、夹取、抬升
+  -> VEL,0.00,-0.80,0.00 后撤约 2.54 s（0.30 m）-> STOP / ACK -> 等待 500 ms
+  -> 放置、释放、收回 -> STOP / ACK
 ```
 
-参数集中在模块顶部：`TARGET_DISTANCE=0.38`、`REAL_SPEED=0.118`、`WALL_APPROACH_TIME=TARGET_DISTANCE/REAL_SPEED`、`BACKOFF_DISTANCE=0.05`；抓取区巡线段沿用 `test_line_to_wall.py` 的同一标定，没有写死 `sleep(3.2)`。后撤实测速度尚未单独标定，暂沿用前进基线。VEL 段沿用 `test_old_grab_sequence.py` 已验证的发送/`ACK,VEL`/100 ms 刷新/结束 STOP 模式。抓取区与墙各 0.38 m 的现场距离、以及固件 `VEL.Y` 上限放宽到 ±0.80，仍依赖烧录和实车确认；该入口不导入 AprilTag、K230D，也没有新增 STM32 协议要求。函数接口为 `run_grab_mission(stm32=None, *, output=print, clock=time.monotonic)`，与 `grab_orange()` 相同：不传连接时自建自关，传入已连接 `Stm32Link` 时复用且不关闭。
+参数集中在模块顶部：`TARGET_DISTANCE=0.38`、`REAL_SPEED=0.118`、`LINE_DURATION=TARGET_DISTANCE/REAL_SPEED`、`BACKOFF_DISTANCE=0.05`、`POST_PICK_RETREAT_DISTANCE=0.30`。0.38 m 只由重捕后的 LINE_FOLLOW 执行一次，不再发送正向 VEL；两个后退段使用 `VEL.Y=-0.80`、每 100 ms 刷新并在结束时等待 STOP ACK。后退实测速度尚未单独标定，暂沿用 0.118 m/s 前进基线，因此 0.05 m 和 0.30 m 距离仍需实车校准。该入口不导入 AprilTag、K230D，也没有新增 STM32 协议要求。
 
 ### 6.5 STM32 入口
 
@@ -529,7 +531,7 @@ LINE_START
 
 AprilTag 两个旧脚本同样是相机人工测试，不包含断言。`test_line_to_tag.py`、`test_navigation_topology_live.py`、`test_junction_turn.py` 和 `test_multi_junction_route.py` 都是带人工启动确认且会驱动底盘的实机入口，不能由自动测试调用。`test_old_grab_sequence.py` 只有在严格输入 `START` 后才驱动底盘、Servo 和 Stepper，并在启动、每段定时距离结束、Ctrl+C、ERR、异常和正常完成路径请求 STOP；它也不能由自动测试调用。`test_line_sensor_capture.py` 只允许 `LINE_STATUS`，不会驱动任何执行器，但会打开真实 STM32 串口，仍需人工单独运行。
 
-`test_route_executor_unit.py` 使用四类 Fake 覆盖两/三动作严格推进、方向不匹配、重复事件、Pi watchdog、全部路口完成但未到站、最终 ARRIVED 后拓扑更新、NavigationController FAULT、AprilTag 异常、STM32 协议错误、空 route 和零路口路线。`test_multi_junction_route_unit.py` 确认未输入严格 `START` 时 STM32/Camera factory 均不会调用。`test_navigation_controller_unit.py` 新增确认最后路口交接不会重复发送 `LINE_START`。`test_line_to_wall_unit.py` 使用 Fake STM32/时钟覆盖距离公式、无需硬件的 dry-run、严格 START、单次 RIGHT 路口流程、计时期间保持 LINE_FOLLOW、错误方向、ERR 和 Ctrl+C STOP；不会连接或驱动实机。`test_grab_mission_unit.py` 使用 Fake 时钟/串口和 grab_orange spy 覆盖完整成功流程（启动 STOP 顺序、LINE_STOP 先于 VEL、正反向 VEL 刷新、共享连接不关闭）、错误方向、错序事件、ERR、Ctrl+C、dry-run 和严格 START；不会连接或驱动实机。其他既有 Fake 测试继续覆盖 resolver、拓扑、Junction 协议、传感器和 STOP；所有单元测试都不连接硬件。
+`test_route_executor_unit.py` 使用四类 Fake 覆盖两/三动作严格推进、方向不匹配、重复事件、Pi watchdog、全部路口完成但未到站、最终 ARRIVED 后拓扑更新、NavigationController FAULT、AprilTag 异常、STM32 协议错误、空 route 和零路口路线。`test_multi_junction_route_unit.py` 确认未输入严格 `START` 时 STM32/Camera factory 均不会调用。`test_navigation_controller_unit.py` 新增确认最后路口交接不会重复发送 `LINE_START`。`test_line_to_wall_unit.py` 使用 Fake STM32/时钟覆盖距离公式、无需硬件的 dry-run、严格 START、单次 RIGHT 路口流程、计时期间保持 LINE_FOLLOW、错误方向、ERR 和 Ctrl+C STOP。`test_grab_task_unit.py` 逐项核对 24 个非底盘动作，覆盖 Servo/Stepper ACK/DONE 日志、启动/结束 STOP、异步 ERR STOP 和未连接保护。`test_grab_mission_unit.py` 覆盖完整成功流程，明确断言不存在正向 VEL 第二段，并验证准备、5 cm 后退、抓取、30 cm 后退和放置的顺序；所有单元测试都不连接硬件。
 
 ## 8. 当前未完成任务和已知缺口
 
@@ -568,7 +570,7 @@ Pi 工作区和 Git 历史中没有 `docs/STM32_PROJECT_MAP.md` 和 `docs/STM32_
 1. 烧录前人工复核 1500 ms / 20 次 / 8 次 / 3000 ms 四个检测参数，以及正 Omega 左转、负 Omega 右转符号、2.2 s/11.5 s 定时值和 2 s 搜索 timeout；保留当前固件以便回退。
 2. 先架空轮或安全支撑验证 STOP 能在 `ADVANCE_TO_CENTER`、`TURN_LEFT`、`TURN_RIGHT`、`SEARCH_LINE` 任一阶段立即急停，并验证 `1110 -> LEFT`、`0111 -> RIGHT`、全黑加 `NEXT_TURN,RIGHT -> RIGHT` 的事件方向。
 3. 再进入低风险场地，依次完成平路直线连续 10 分钟无误触发、上坡扰动不误触发、左右真实 T 都能完整输出 `JUNCTION_DETECTED -> ADVANCE -> TURN -> SEARCH -> LINE_REACQUIRED`；记录传感器序列、实际前进距离、左右转角和重捕用时。
-4. 单 T 左右转稳定后使用 `test_line_to_wall.py` 验证右转重捕后 0.38 m 定时到墙；随后在同一现场参数下人工运行 `competition/grab_mission.py`，验证抓取区 LINE_STOP、0.38 m 抵墙、0.05 m 后撤与 `grab_orange()` 的衔接。STRAIGHT 和多路口 RouteExecutor 组合仍需另行恢复/验证。
+4. 单 T 左右转稳定后使用 `test_line_to_wall.py` 验证右转重捕后仅巡线一次 0.38 m 到墙；随后分阶段验证机械臂准备、0.05 m 后退、抓取、0.30 m 后退和放置，全部单项安全后才运行 `competition/grab_mission.py`。两个后退段应分别测量实际速度，不能直接把当前 0.118 m/s 前进基线视为最终标定。STRAIGHT 和多路口 RouteExecutor 组合仍需另行恢复/验证。
 5. 多路口与最终 Tag 到站稳定后，再设计 RouteExecutor 接入 CompetitionRunner 的事件和 live 生命周期；当前 `competition/main.py` 继续固定 simulation mode。
 6. 继续单独处理普通 LINE_FOLLOW 下持续 `0000` 和近距离 Tag 移出画面的安全风险，并现场测量 Tag、T 字路口和停车点；本轮未改变 AprilTag 算法或坐标 TODO。
 

@@ -91,11 +91,11 @@ TaskController.reset_arm()
   -> ArmSequence.safe_home()
 ```
 
-`grab_orange()` 和 `grab_purple()` 当前返回 `NotImplemented`。仓库中的三个已验证 group 都包含抓取和放置，尚无颜色到独立抓取动作的可靠映射。`startup_raise()` 仍是独立入口的启动策略，不由 `build()` 隐式执行。
+`TaskController.grab_orange()` 和 `TaskController.grab_purple()` 当前仍返回 `NotImplemented`，因此 CompetitionRunner 的这两个入口没有接线。与它们分离的固定路线入口 `competition/grab_mission.py` 使用操作者后来确认过的旧候选机械臂动作；它不修改或复用三个搭建 group，也不代表颜色视觉已经接入。`startup_raise()` 仍是独立入口的启动策略，不由 `build()` 隐式执行。
 
 对外部 STM32 工程的只读动作考古没有改变这一边界。`Core/Src/main.c` 的未调用 `Test_All()` 中有一个 `#if 0` 旧候选：Servo1/2/4 先到 0/0/135，底盘执行两段 `Move_Distance`，Stepper 以 800 pps 执行 +3000，Servo4 到 105、Servo2 到 15，再执行 -3000；底盘随后后退，Servo2 到 0、Servo1 以 10 ms/degree Sweep 到 93，最后 Stepper +5000、Servo4 到 135、Stepper -5000，各主要动作间保持原 500 ms 延时。它没有橙色或中间盒标注，也不在正式运行链中，并且包含不可忽略的底盘动作。
 
-该候选与当前 `ArmSequence.group1()` 的 Servo2、Servo1 和第二段 Stepper 参数明显不同，不能视为同一版本。由于 STM32 工程目录无可用 Git 历史、当前烧录版本未关联、Stepper 无原点/限位/编码器，架构层不会从该候选推导新动作。`grab_orange()` 只有在动作语义、完整顺序和机械起始姿态（尤其 Stepper 当前高度，以及是否先且仅先执行一次 -1500 @ 800 pps）经实机记录确认后，才可沿 `CompetitionRunner -> TaskController -> ArmSequence -> Stm32Link` 接入。
+该候选与当前 `ArmSequence.group1()` 的 Servo2、Servo1 和第二段 Stepper 参数明显不同，不能视为同一版本。操作者后续确认了其中机械臂动作可以工作，因此 `competition/grab_task.py` 将全部 24 个非底盘动作独立封装；`competition/grab_mission.py` 则在相应边界插入 0.05 m 和 0.30 m 后退。重捕后的 0.38 m LINE_FOLLOW 取代旧候选的前进定位，不能再叠加第二段正向 VEL。由于 STM32 烧录版本、Stepper 起始高度和后退速度仍未现场关联，这条固定路线仍须分阶段实测，且暂不接入 `CompetitionRunner -> TaskController -> ArmSequence`。
 
 ### 3.2 competition 视觉接近组件
 

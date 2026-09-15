@@ -10,13 +10,21 @@ from hardware.stm32_link import Stm32ProtocolError
 from competition.grab_mission import (
     BACKOFF_DISTANCE,
     BACKOFF_TIME,
-    GRAB_AREA_APPROACH_TIME,
+    LINE_DURATION,
+    POST_PICK_RETREAT_DISTANCE,
+    POST_PICK_RETREAT_TIME,
     REAL_SPEED,
     TARGET_DISTANCE,
-    WALL_APPROACH_TIME,
     MissionPhase,
     main,
     run_grab_mission,
+)
+from competition.grab_task import (
+    PICK_ARM_STEPS,
+    PLACE_ARM_STEPS,
+    PREPARE_ARM_STEPS,
+    PRE_PICK_SETTLE_STEPS,
+    PRE_PLACE_SETTLE_STEPS,
 )
 
 
@@ -46,6 +54,7 @@ class FakeStm32Link:
         self.interrupt_when_empty = interrupt_when_empty
         self.is_connected = False
         self.calls: list[object] = []
+        self.timed_calls: list[tuple[float, object]] = []
 
     def connect(self) -> None:
         self.is_connected = True
@@ -56,7 +65,9 @@ class FakeStm32Link:
         self.calls.append("close")
 
     def send_command(self, command: str) -> str:
-        self.calls.append(("send", command))
+        call = ("send", command)
+        self.calls.append(call)
+        self.timed_calls.append((self.clock(), call))
         return command
 
     def wait_ack(self, command: str, timeout: float = 2.0) -> str:
@@ -95,10 +106,13 @@ def _sent_commands(link: FakeStm32Link) -> list[str]:
 
 class GrabMissionTests(unittest.TestCase):
     def test_duration_constants_derive_from_distance_and_real_speed(self) -> None:
-        self.assertEqual(WALL_APPROACH_TIME, TARGET_DISTANCE / REAL_SPEED)
-        self.assertAlmostEqual(WALL_APPROACH_TIME, 3.220338983, places=6)
-        self.assertEqual(GRAB_AREA_APPROACH_TIME, TARGET_DISTANCE / REAL_SPEED)
+        self.assertEqual(LINE_DURATION, TARGET_DISTANCE / REAL_SPEED)
+        self.assertAlmostEqual(LINE_DURATION, 3.220338983, places=6)
         self.assertEqual(BACKOFF_TIME, BACKOFF_DISTANCE / REAL_SPEED)
+        self.assertEqual(
+            POST_PICK_RETREAT_TIME,
+            POST_PICK_RETREAT_DISTANCE / REAL_SPEED,
+        )
 
     def test_full_mission_success_shares_link_with_grab(self) -> None:
         clock = FakeClock()
@@ -106,7 +120,21 @@ class GrabMissionTests(unittest.TestCase):
         link = FakeStm32Link(clock, list(JUNCTION_LINES))
         link.is_connected = True
 
-        with mock.patch("competition.grab_mission.grab_orange") as grab_spy:
+        arm_steps_seen: list[object] = []
+
+        def record_arm_steps(
+            stm32: object,
+            steps: object,
+            **kwargs: object,
+        ) -> None:
+            self.assertIs(stm32, link)
+            arm_steps_seen.append(steps)
+            link.calls.append(("arm", steps))
+
+        with mock.patch(
+            "competition.grab_mission.execute_grab_steps",
+            side_effect=record_arm_steps,
+        ):
             result = run_grab_mission(
                 link,
                 output=output.append,
@@ -121,20 +149,57 @@ class GrabMissionTests(unittest.TestCase):
             "LINE_START",
             "LINE_STOP",
         ])
-        self.assertIn("VEL,0.00,0.80,0.00", sent)
         self.assertIn("VEL,0.00,-0.80,0.00", sent)
-        self.assertGreater(sent.count("VEL,0.00,0.80,0.00"), 1)
-        # Three confirmed STOPS: startup, wall approach end, backoff end.
+        self.assertNotIn("VEL,0.00,0.80,0.00", sent)
+        # Startup, both backward segments, and final mission STOP.
         self.assertEqual(
             [call for call in link.calls if call == ("stop", True)],
-            [("stop", True)] * 3,
+            [("stop", True)] * 4,
         )
         # The caller-supplied link is left open for reuse.
         self.assertTrue(link.is_connected)
         self.assertNotIn("close", link.calls)
-        # The verified arm task receives the shared connection.
-        grab_spy.assert_called_once()
-        self.assertIs(grab_spy.call_args.kwargs["stm32"], link)
+        self.assertEqual(
+            arm_steps_seen,
+            [
+                PREPARE_ARM_STEPS,
+                PRE_PICK_SETTLE_STEPS,
+                PICK_ARM_STEPS,
+                PRE_PLACE_SETTLE_STEPS,
+                PLACE_ARM_STEPS,
+            ],
+        )
+        line_stop_index = link.calls.index(("send", "LINE_STOP"))
+        prepare_index = link.calls.index(("arm", PREPARE_ARM_STEPS))
+        pre_pick_settle_index = link.calls.index(
+            ("arm", PRE_PICK_SETTLE_STEPS)
+        )
+        pick_index = link.calls.index(("arm", PICK_ARM_STEPS))
+        retreat_settle_index = link.calls.index(
+            ("arm", PRE_PLACE_SETTLE_STEPS)
+        )
+        place_index = link.calls.index(("arm", PLACE_ARM_STEPS))
+        backward_vel_indices = [
+            index
+            for index, call in enumerate(link.calls)
+            if call == ("send", "VEL,0.00,-0.80,0.00")
+        ]
+        self.assertLess(line_stop_index, prepare_index)
+        self.assertTrue(
+            any(
+                prepare_index < index < pre_pick_settle_index
+                for index in backward_vel_indices
+            )
+        )
+        self.assertLess(pre_pick_settle_index, pick_index)
+        self.assertTrue(
+            any(
+                pick_index < index < retreat_settle_index
+                for index in backward_vel_indices
+            )
+        )
+        self.assertLess(pick_index, retreat_settle_index)
+        self.assertLess(retreat_settle_index, place_index)
         for expected in (
             "=== GRAB MISSION START ===",
             "START LINE FOLLOW",
@@ -143,13 +208,13 @@ class GrabMissionTests(unittest.TestCase):
             "TURN COMPLETE",
             "LINE REACQUIRED",
             "Continue line following",
-            "Wall approach:",
-            "distance=0.38m",
-            "time=3.22s",
-            "Wall reached",
+            "Wall reached by line following",
+            "Prepare arm",
             "Backoff 5cm",
-            "Start arm grab",
-            "Grab complete",
+            "Pick object",
+            "Post-pick retreat 30cm",
+            "Place object",
+            "Grab and placement complete",
             "=== MISSION SUCCESS ===",
         ):
             self.assertTrue(
@@ -166,11 +231,13 @@ class GrabMissionTests(unittest.TestCase):
         )
         link.is_connected = True
 
-        with mock.patch("competition.grab_mission.grab_orange") as grab_spy:
+        with mock.patch(
+            "competition.grab_mission.execute_grab_steps"
+        ) as arm_spy:
             with self.assertRaises(Stm32ProtocolError):
                 run_grab_mission(link, output=output.append, clock=clock)
 
-        grab_spy.assert_not_called()
+        arm_spy.assert_not_called()
         self.assertIn(("stop", False), link.calls)
         self.assertTrue(
             any("Expected TURN_STARTED,RIGHT" in line for line in output)
@@ -178,6 +245,36 @@ class GrabMissionTests(unittest.TestCase):
         self.assertTrue(
             any("=== MISSION ABORTED:" in line for line in output)
         )
+
+    def test_line_duration_starts_at_line_reacquired_event(self) -> None:
+        clock = FakeClock()
+        link = FakeStm32Link(
+            clock,
+            [
+                b"JUNCTION_DETECTED\r\n",
+                b"TURN_STARTED,RIGHT\r\n",
+                b"LINE_REACQUIRED\r\n",
+                b"",
+                b"",
+                b"",
+                b"",
+                b"TURN_DONE,RIGHT\r\n",
+            ],
+        )
+        link.is_connected = True
+
+        with mock.patch("competition.grab_mission.execute_grab_steps"):
+            run_grab_mission(link, output=lambda line: None, clock=clock)
+
+        line_stop_at = next(
+            timestamp
+            for timestamp, call in link.timed_calls
+            if call == ("send", "LINE_STOP")
+        )
+        # LINE_REACQUIRED is read at t=0.75.  Waiting for the later TURN_DONE
+        # must not restart the 3.22 s line-follow timer.
+        self.assertGreaterEqual(line_stop_at, 0.75 + LINE_DURATION)
+        self.assertLess(line_stop_at, 4.25)
 
     def test_out_of_order_turn_event_before_junction_aborts(self) -> None:
         clock = FakeClock()
@@ -268,7 +365,7 @@ class GrabMissionTests(unittest.TestCase):
         clock = FakeClock()
         link = FakeStm32Link(clock, list(JUNCTION_LINES))
 
-        with mock.patch("competition.grab_mission.grab_orange") as grab_spy:
+        with mock.patch("competition.grab_mission.execute_grab_steps") as arm_spy:
             result = main(
                 [],
                 stm32_factory=lambda: link,  # type: ignore[arg-type]
@@ -279,7 +376,7 @@ class GrabMissionTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertIn("connect", link.calls)
-        grab_spy.assert_called_once()
+        self.assertEqual(arm_spy.call_count, 5)
         # main closes the link it created, even on the success path.
         self.assertEqual(link.calls[-1], "close")
         self.assertFalse(link.is_connected)
