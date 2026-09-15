@@ -19,6 +19,7 @@ robogame/
 ├── main_controller_align.py       # 当前 K230D 对准、接近并触发搭建的主控入口
 ├── arm_sequence.py                # 可复用的已验证机械臂动作与 STM32 请求/响应封装
 ├── build_sequence.py              # 独立机械臂搭建测试入口
+├── robot_startup.py               # 启动前机械臂预升高，不是真正 Homing
 ├── config.py                      # 正式串口路径和波特率，现有入口尚未统一导入
 ├── hardware/
 │   └── stm32_link.py              # 显式连接的 STM32 通信抽象层
@@ -289,7 +290,21 @@ STOP -> ALIGN <-> APPROACH -> READY -> ARM_BUILD -> BUILD_DONE
 
 此入口会驱动真实机械结构，只能在人工确认环境安全后执行。
 
-#### 6.3.1 旧抓放候选动作测试入口
+#### 6.3.1 人工启动预升高入口：`robot_startup.py`
+
+`robot_startup.py` 是树莓派启动后由操作者单独运行的一次性准备脚本，用途是“启动前机械臂预升高，不是真正 Homing”。它不接入 competition 状态机，不修改 `ArmSequence`、Servo 参数、Stepper 速度或 STM32 协议。
+
+```bash
+cd ~/robogame
+source venv/bin/activate
+python3 robot_startup.py
+```
+
+脚本复用 `hardware.stm32_link.Stm32Link` 和项目正式 by-id 串口配置，依次执行 `connect -> HELLO_STM32,1 -> STEPPER_MOVE,-1500,800 -> STOP -> close`。`STARTUP_RAISE_STEPS=-1500` 和 `STARTUP_RAISE_PPS=800` 集中在文件顶部，与现有 `ArmSequence.startup_raise()` 一致；等待完整 ACK 和 `STEPPER_MOVE_DONE,-1500` 后才发送带 ACK 的 STOP。连接、HELLO、Stepper、ERR 或 Ctrl+C 异常都会退出，并在连接仍有效时尝试发送 STOP。
+
+因为升降轴没有上限位开关和编码器，这只是相对向上移动固定步数，不能建立真实机械零点；重复运行会继续向上移动，必须由操作者确认剩余行程并准备物理急停。
+
+#### 6.3.2 旧抓放候选动作测试入口
 
 ```bash
 python3 tests/test_old_grab_sequence.py --dry-run
@@ -303,7 +318,7 @@ python3 tests/test_old_grab_sequence.py \
 
 脚本保留旧 `main.c:214-248` 的全部 27 个源码步骤及原延时。UART 语法不变，STM32 只把 `VEL.Y` 合法范围从 ±0.30 放宽到 ±0.80；三段 `Move_Distance` 仍由 Pi 每 100 ms 刷新 `VEL` 并按时间估算。脚本默认发送 ±0.80 命令值，计时则使用独立的前进/后退实测速度参数；以目前唯一可用的巡线实测基线 0.118 m/s 计算，+0.50 m、-0.05 m、-0.30 m 分别持续约 4.24 s、0.42 s、2.54 s，每段结束发送 STOP 并等待 ACK。后退暂沿用前进基线，必须单独实测后更新；该实现不是旧版编码器闭环，实际行程仍会受加减速、打滑、负载和通信延迟影响。旧固件未烧录新上限时会返回 `ERR,VEL`，脚本随后立即 STOP。该入口不表示完整抓放候选或颜色/箱位语义已经验证，也没有修改或复用 `ArmSequence` 的既有搭建动作。
 
-#### 6.3.2 正式抓取任务模块入口
+#### 6.3.3 正式抓取任务模块入口
 
 ```bash
 python3 -m competition.grab_task --dry-run

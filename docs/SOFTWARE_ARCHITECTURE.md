@@ -57,6 +57,7 @@ Logitech C270 ──USB Video───┼──> Raspberry Pi 5
 | 局部主控 | `main_controller_align.py` | K230D 对准、接近、停车、人工触发搭建 | 第一版联调完成 |
 | 机械动作 | `arm_sequence.py` | 已验证的三组搭建动作 | 已接入局部主控 |
 | 独立入口 | `build_sequence.py` | 单独回归机械臂完整动作 | 已实机使用 |
+| 启动准备入口 | `robot_startup.py` | HELLO 后按 `-1500 @ 800 pps` 将升降轴相对上移一次 | 人工单次运行；不是 Homing，不接入比赛状态机 |
 
 ## 3. 当前实际运行链路
 
@@ -345,6 +346,13 @@ K230D 串口
 ### 3.6 独立机械臂模式
 
 ```text
+robot_startup.py
+  -> Stm32Link.connect()
+  -> HELLO_STM32,1 / STM32_OK,1
+  -> STEPPER_MOVE,-1500,800 / ACK / STEPPER_MOVE_DONE
+  -> STOP / ACK
+  -> 关闭串口
+
 build_sequence.py
   -> 打开 STM32
   -> HELLO_STM32,1
@@ -352,6 +360,8 @@ build_sequence.py
   -> 人工菜单选择 group 1/2/3/all
   -> STOP / 关闭串口
 ```
+
+`robot_startup.py` 复用 `hardware.stm32_link.Stm32Link`，不自行创建串口协议实现。它只用于人工启动前机械臂预升高，不是真正 Homing：升降轴没有限位开关或编码器，脚本无法判断绝对高度，重复运行会继续向上移动。连接、HELLO、Stepper、ERR 或 Ctrl+C 异常均退出，并在连接仍有效时执行 best-effort STOP。该入口不会被 `CompetitionRunner`、`MissionController` 或任何自动比赛流程调用。
 
 该入口用于机械臂回归和分组调试，不应和整车主控同时运行。
 
