@@ -50,7 +50,8 @@ robogame/
 │   ├── test_old_grab_sequence.py # 旧抓放候选动作独立测试入口
 │   ├── test_old_grab_left_sequence.py  # 到墙抓取、后撤并放入左盒的完整入口
 │   ├── test_old_grab_right_sequence.py # 到墙抓取、后撤并放入右盒的完整入口
-│   └── test_line_to_wall.py      # 巡线、右转、重捕后定时到墙入口
+│   ├── test_line_to_wall.py      # 巡线、右转、重捕后定时到墙入口
+│   └── test_visual_grab_sequence.py # K230D视觉辅助单次抓取实验入口
 ├── legacy/                        # 旧主控、旧协议和早期原型
 ├── docs/                          # 环境、场地、协议、架构和状态文档
 ├── RoboGame2026 竞技组规则手册3_0.pdf
@@ -141,6 +142,7 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 | 路口协议与人工入口 | 软件完成，待烧录/实车 | `test_junction_turn.py` 支持直接指定动作，或由 start/target 规划路线并只取首个动作；严格输入 `START` 后才连接，`TURN_DONE` 后 STOP，不会连续跑多个路口 |
 | 巡线到抓取墙测试 | Pi 入口完成，待烧录/实车 | `test_line_to_wall.py` 使用现有协议执行启动 STOP、预设 RIGHT、LINE_START、等待首个 `JUNCTION_DETECTED` 和 `LINE_REACQUIRED`，再保持 LINE_FOLLOW 约 3.22 s 后 LINE_STOP；STM32 已补上 `0111 -> RIGHT`，尚未烧录 |
 | 巡线到抓取完整任务 | Pi 入口完成，待实车 | `competition/grab_mission.py` 在右转重捕后先 LINE_STOP并前伸机械臂，再LINE_START巡线0.38 m到墙；随后后退0.05 m、抓取、后退0.30 m、放置并进入95/135/90/95/90静止姿态。全程STOP/ERR/Ctrl+C安全收尾，未实车 |
+| K230D视觉辅助单次抓取实验 | 代码完成，待实车 | `tests/test_visual_grab_sequence.py` 复用已验证的机械臂准备、撞墙、后撤、抓取与放盒动作，抓取前插入 K230D SEARCH/ALIGN/READY 视觉定位；验证 K230D 能否替代固定抓取位置；不接入比赛状态机 |
 | competition 流程调度 | 第一版模拟流程完成 | `CompetitionRunner` 通过外部事件串联巡线、橙色目标接近、抓取、搭建和结束；默认 simulation mode 不调用硬件控制器 |
 | 机械臂任务控制 | 橙色抓取已封装，待接入控制器 | `TaskController.build()` 复用 `ArmSequence.run_all()`，`reset_arm()` 复用 `safe_home()`；新增 `competition/grab_task.py` 把已实机验证的旧版机械臂抓取动作封装为 `grab_orange()`，`TaskController.grab_orange()` 保持 NotImplemented，接线留待后续 |
 | 比赛入口 | 安全模拟入口完成 | `python -m competition.main` 初始化 CompetitionRunner，默认只打印 simulation/START 及子控制器状态，不连接或运行任何硬件 |
@@ -511,6 +513,32 @@ STOP / ACK
 ```
 
 参数集中在模块顶部：`TARGET_DISTANCE=0.38`、`REAL_SPEED=0.118`、`LINE_DURATION=TARGET_DISTANCE/REAL_SPEED`、`BACKOFF_DISTANCE=0.05`、`POST_PICK_RETREAT_DISTANCE=0.30`。重捕黑线后先停车准备机械臂；0.38 m计时从准备完成后重新发送 `LINE_START` 的时刻开始，因此机械臂调整耗时不会侵占巡线距离。0.38 m只由 LINE_FOLLOW 执行一次，不发送正向 VEL；两个后退段使用 `VEL.Y=-0.80`、每100 ms刷新并在结束时等待STOP ACK。后退实测速度尚未单独标定，暂沿用0.118 m/s前进基线。该入口不导入AprilTag、K230D，也没有新增STM32协议要求。
+
+### 6.4.6 K230D 视觉辅助单次抓取实验入口
+
+```bash
+python3 tests/test_visual_grab_sequence.py --dry-run
+python3 tests/test_visual_grab_sequence.py
+```
+
+`tests/test_visual_grab_sequence.py` 验证 K230D 视觉定位能否替代固定抓取位置。它不修改比赛状态机、`arm_sequence.py`、`competition/task_controller.py`、`hardware/stm32_link.py`、`vision/k230_link.py` 或 STM32 协议。`--dry-run` 只打印流程和参数，不打开串口；实机入口必须单独按 ENTER 才开始动作，单次执行后不自动循环。
+
+启动时连接一个 `Stm32Link` 和一个 `K230Link`，先执行 `HELLO_STM32,1` 握手并收到 `STM32_OK,1`，随后等待启动保护 STOP ACK，流程依次为：
+
+```text
+STOP / ACK
+  -> PREPARE_ARM（旧步骤1-5机械臂前伸准备）
+  -> 撞墙：VEL 前进约 4.24 s（0.50 m）-> STOP / ACK
+  -> 后撤到视觉抓取位置：VEL 后退约 0.42 s（0.05 m）-> STOP / ACK -> 等待 500 ms
+  -> SEARCH：NO_TARGET 时以 VEL,x=-0.10 缓慢向左横移扩大搜索范围
+  -> ALIGN：TARGET 时按 error_x 以 VEL,x=±0.10 左右横移，目标 abs(error_x)<30
+  -> READY：abs(error_x)<30 且 pixels>0 连续 5 帧 -> STOP / ACK
+  -> PICK：下降、夹取、抬升
+  -> VEL 后退约 2.54 s（0.30 m）-> STOP / ACK -> 等待 500 ms
+  -> PLACE：放入中间盒并执行 Servo0..4=95/135/90/95/90 静止姿态 -> STOP / ACK
+```
+
+SEARCH 超过 `--search-timeout`（默认 10 s）或 K230D 超过 0.60 s 无有效数据会 STOP 并进入故障清理；K230D 断开、STM32 `ERR`、协议超时和 Ctrl+C 均先尝试全局 STOP，再释放 STM32 与 K230D 连接。机械臂阶段停止读取 K230D，由已验证抓取动作独占 STM32 回复。该入口只验证单次橙色抓取，不实现连续抓取、紫色方块、AprilTag 或 CompetitionRunner 接入。
 
 ### 6.5 STM32 入口
 

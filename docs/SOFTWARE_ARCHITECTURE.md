@@ -60,6 +60,7 @@ Logitech C270 ──USB Video───┼──> Raspberry Pi 5
 | 启动准备入口 | `robot_startup.py` | HELLO 后按 `-1500 @ 800 pps` 将升降轴相对上移一次 | 人工单次运行；不是 Homing，不接入比赛状态机 |
 | 左盒完整抓放入口 | `tests/test_old_grab_left_sequence.py` | 到墙抓取、放入左盒并进入95/135/90/95/90静止姿态 | 人工单次运行；待实机验证，不接入比赛状态机 |
 | 右盒完整抓放入口 | `tests/test_old_grab_right_sequence.py` | 到墙抓取、放入右盒并进入95/135/90/95/90静止姿态 | 人工单次运行；待实机验证，不接入比赛状态机 |
+| 视觉辅助抓取实验 | `tests/test_visual_grab_sequence.py` | 撞墙、后撤、K230D SEARCH/ALIGN/READY 定位与已验证抓取/放盒组合 | 人工单次运行；待实机验证，不接入比赛状态机 |
 
 ## 3. 当前实际运行链路
 
@@ -344,6 +345,22 @@ K230D 串口
 这个模式已经把底盘停车和机械臂动作放在同一进程、同一 STM32 串口连接中。机械臂阶段停止读取 K230D 和发送底盘运动命令，由 `ArmSequence` 独占 STM32 回复。
 
 它仍不是比赛全流程：没有巡线任务切换，没有橙色/紫色两类任务调度，也没有使用 AprilTag 世界模型。
+
+### 3.5.1 K230D 视觉辅助单次抓取实验
+
+```text
+tests/test_visual_grab_sequence.py
+  -> HELLO_STM32,1 / STM32_OK,1 -> Press ENTER -> STOP / ACK
+  -> PREPARE_ARM（旧步骤1-5）
+  -> 撞墙 0.50 m -> STOP / ACK
+  -> 后撤到视觉抓取位置 0.05 m -> STOP / ACK -> 等待 500 ms
+  -> SEARCH（NO_TARGET -> VEL,x=-0.10 缓慢左移；超时停车）
+  -> ALIGN（TARGET -> 按 error_x 以 VEL,x=±0.10 左右横移）
+  -> READY（abs(error_x)<30 且 pixels>0 连续 5 帧 -> STOP / ACK）
+  -> PICK -> 后撤 0.30 m -> PLACE -> 静止姿态 -> STOP
+```
+
+该实验入口复用 `Stm32Link`、`K230Link` 和 `competition/grab_task.py` 的已验证动作段，以横移式 SEARCH/ALIGN 状态机实现视觉定位（与 `main_controller_align.py` 的旋转+前进方式不同），用于验证 K230D 视觉定位能否替代固定抓取位置。它不修改 `arm_sequence.py`、比赛状态机或 STM32 协议；机械臂阶段停止读取 K230D，由已验证抓取动作独占 STM32 回复。K230D 断开、0.60 s 无有效数据、SEARCH 超时、STM32 ERR 或 Ctrl+C 都先请求全局 STOP 再释放两个串口。
 
 ### 3.6 独立机械臂模式
 
@@ -636,6 +653,7 @@ tests/vel_test.py            会驱动底盘
 tests/motor_cmd_test.py      启动后会依次驱动底盘
 tests/line_test.py           任意文本命令透传并原样显示回复；可安全发送 LINE_STATUS，也可发送会驱动底盘的命令
 tests/servo_test.py          通用命令透传，可能驱动任意执行器
+tests/test_visual_grab_sequence.py 人工确认后撞墙、K230D视觉定位、单次抓取与放盒；会驱动底盘/机械臂并打开STM32与K230D串口
 其他 uart/stm32 脚本        链路诊断，部分使用历史设备路径
 ```
 
