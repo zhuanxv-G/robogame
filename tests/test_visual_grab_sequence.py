@@ -21,7 +21,9 @@ fixed grab position.  It does NOT touch the competition state machine,
 
 Serial ownership: one ``Stm32Link`` owns the STM32 CH340 and one ``K230Link``
 owns the K230D USB serial.  Both are created through the existing links and
-closed in ``finally``.  Importing this module has no hardware side effects.
+closed in ``finally``.  If the K230D USB link drops mid-run the entry retries
+close+connect a few times before falling back to the safety STOP.  Importing
+this module has no hardware side effects.
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ from hardware.stm32_link import (  # noqa: E402
     Stm32Link,
     Stm32ProtocolError,
 )
-from vision.k230_link import K230Link  # noqa: E402
+from vision.k230_link import K230Link, K230Result  # noqa: E402
 from competition.grab_task import (  # noqa: E402
     GRAB_REST_SERVO_ANGLES,
     PICK_ARM_STEPS,
@@ -89,6 +91,8 @@ READY_CONFIRM_FRAMES = 5   # 连续满足帧数才进入 READY
 PIXELS_VALID_MIN = 1       # pixels 有效：必须 > 0，排除空检测
 K230_TIMEOUT_S = 0.60      # K230D 无有效数据超时（与已验证主控一致）
 DEFAULT_SEARCH_TIMEOUT_S = 10.0  # SEARCH 未发现目标超时
+K230_RECONNECT_ATTEMPTS = 3  # K230D 串口断开后的重连尝试次数
+K230_RECONNECT_WAIT_S = 1.0  # 两次重连尝试之间的等待
 STATUS_PRINT_INTERVAL = 0.25
 
 
@@ -279,6 +283,62 @@ def _emergency_stop(
 # K230D 视觉定位阶段：SEARCH -> ALIGN -> READY
 # ============================================================
 
+def _read_k230_latest_with_reconnect(
+    stm32: Stm32Link,
+    k230: K230Link,
+    *,
+    output: Callable[[str], object],
+    clock: Callable[[], float],
+) -> tuple[K230Result | None, bool]:
+    """Read the newest K230D message, reconnecting after a USB drop.
+
+    A mid-run USB re-enumeration surfaces as ``OSError`` on the next read.
+    This retries close+connect with the existing K230Link methods a few
+    times before giving up.  Returns ``(result, reconnected)``; callers
+    refresh their data-age timestamps when ``reconnected`` is True.
+
+    The VEL refresh stops during the reconnect waits, so the STM32 REMOTE
+    watchdog halts the chassis by itself — that is intentional.
+    """
+    try:
+        return k230.read_latest(), False
+    except OSError as exc:
+        output(
+            f"K230D 串口断开: {type(exc).__name__}: {exc}，"
+            f"尝试重连（最多 {K230_RECONNECT_ATTEMPTS} 次）..."
+        )
+        for attempt in range(1, K230_RECONNECT_ATTEMPTS + 1):
+            try:
+                k230.close()
+                k230.connect()
+            except Exception as reconnect_exc:
+                output(
+                    f"K230D 重连第 {attempt} 次失败: "
+                    f"{type(reconnect_exc).__name__}: {reconnect_exc}"
+                )
+                if attempt < K230_RECONNECT_ATTEMPTS:
+                    _guarded_delay(
+                        stm32,
+                        K230_RECONNECT_WAIT_S,
+                        label="K230D重连等待",
+                        output=output,
+                        clock=clock,
+                    )
+                continue
+            output("K230D 重连成功，继续视觉定位。")
+            try:
+                return k230.read_latest(), True
+            except OSError as retry_exc:
+                output(
+                    f"K230D 重连后再次断开: "
+                    f"{type(retry_exc).__name__}: {retry_exc}"
+                )
+        raise OSError(
+            f"K230D 串口断开且重连 {K230_RECONNECT_ATTEMPTS} 次均失败: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+
 def run_visual_phase(
     stm32: Stm32Link,
     k230: K230Link,
@@ -293,7 +353,8 @@ def run_visual_phase(
     left/right on error_x; READY needs abs(error_x)<30 and pixels>0 for five
     consecutive frames, then sends STOP and waits for ACK,STOP before the
     grab phase.  Raises on STM32 ERR lines, K230D silence or search timeout;
-    the caller's safety wrapper performs the emergency STOP.
+    a dropped K230D USB link is retried a few times first.  The caller's
+    safety wrapper performs the emergency STOP.
     """
     phase = VisualPhase.SEARCH
     ready_frames = 0
@@ -314,7 +375,12 @@ def run_visual_phase(
         now = clock()
 
         # --- 1. 观察 STM32 异步消息；ERR 立即失败 ---
-        raw_line = stm32.readline()
+        try:
+            raw_line = stm32.readline()
+        except OSError as exc:
+            raise OSError(
+                f"STM32 串口断开: {type(exc).__name__}: {exc}"
+            ) from exc
         if raw_line:
             line = raw_line.decode(errors="replace").strip()
             if line:
@@ -322,8 +388,17 @@ def run_visual_phase(
                 if line.startswith("ERR,"):
                     raise Stm32ProtocolError(f"STM32 error: {line}")
 
-        # --- 2. 读取 K230D 最新一条消息 ---
-        result = k230.read_latest()
+        # --- 2. 读取 K230D 最新一条消息（断开时尝试重连）---
+        result, reconnected = _read_k230_latest_with_reconnect(
+            stm32,
+            k230,
+            output=output,
+            clock=clock,
+        )
+        if reconnected:
+            # 重连成功后刷新数据年龄与搜索计时，避免误触安全超时
+            last_k230_data_at = now
+            search_started_at = now
         if result is not None:
             last_k230_data_at = now
             last_target = result["target"]
@@ -446,6 +521,10 @@ def _print_plan(
         f"ready_frames={READY_CONFIRM_FRAMES}"
     )
     output(f"search_timeout={args.search_timeout:.1f} s")
+    output(
+        f"k230_reconnect_attempts={K230_RECONNECT_ATTEMPTS} "
+        f"(wait {K230_RECONNECT_WAIT_S:.1f} s)"
+    )
     output(
         f"visual_servo0_angle={VISUAL_SERVO0_ANGLE} deg "
         "（视觉阶段机械臂转离视野）"

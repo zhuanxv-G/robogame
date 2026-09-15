@@ -361,7 +361,7 @@ tests/test_visual_grab_sequence.py
   -> PICK -> 后撤 0.30 m -> PLACE -> 静止姿态 -> STOP
 ```
 
-该实验入口复用 `Stm32Link`、`K230Link` 和 `competition/grab_task.py` 的已验证动作段，以横移式 SEARCH/ALIGN 状态机实现视觉定位（与 `main_controller_align.py` 的旋转+前进方式不同），用于验证 K230D 视觉定位能否替代固定抓取位置。它不修改 `arm_sequence.py`、比赛状态机或 STM32 协议；机械臂阶段停止读取 K230D，由已验证抓取动作独占 STM32 回复。K230D 断开、0.60 s 无有效数据、SEARCH 超时、STM32 ERR 或 Ctrl+C 都先请求全局 STOP 再释放两个串口。撞墙与视觉阶段机械臂固定为 Servo0=0、Servo1/2/4=0/0/135（旧步骤1-5初始姿态）避免遮挡 K230D 视野，READY 后恢复 Servo0=95 并重新执行旧步骤1-5确认抓取姿态；PREPARE 在距墙 0.05 m 处重跑，前伸空间待实车确认。
+该实验入口复用 `Stm32Link`、`K230Link` 和 `competition/grab_task.py` 的已验证动作段，以横移式 SEARCH/ALIGN 状态机实现视觉定位（与 `main_controller_align.py` 的旋转+前进方式不同），用于验证 K230D 视觉定位能否替代固定抓取位置。它不修改 `arm_sequence.py`、比赛状态机或 STM32 协议；机械臂阶段停止读取 K230D，由已验证抓取动作独占 STM32 回复。K230D 串口断开先以现有 close+connect 重连（默认 3 次、间隔 1 s），重连失败、0.60 s 无有效数据、SEARCH 超时、STM32 ERR 或 Ctrl+C 才请求全局 STOP 并释放两个串口。撞墙与视觉阶段机械臂固定为 Servo0=0、Servo1/2/4=0/0/135（旧步骤1-5初始姿态）避免遮挡 K230D 视野，READY 后恢复 Servo0=95 并重新执行旧步骤1-5确认抓取姿态；PREPARE 在距墙 0.05 m 处重跑，前伸空间待实车确认。
 
 ### 3.6 独立机械臂模式
 

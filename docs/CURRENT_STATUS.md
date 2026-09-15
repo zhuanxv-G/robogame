@@ -540,7 +540,7 @@ STOP / ACK
   -> PLACE：放入中间盒并执行 Servo0..4=95/135/90/95/90 静止姿态 -> STOP / ACK
 ```
 
-SEARCH 超过 `--search-timeout`（默认 10 s）或 K230D 超过 0.60 s 无有效数据会 STOP 并进入故障清理；K230D 断开、STM32 `ERR`、协议超时和 Ctrl+C 均先尝试全局 STOP，再释放 STM32 与 K230D 连接。机械臂阶段停止读取 K230D，由已验证抓取动作独占 STM32 回复。撞墙与视觉阶段机械臂固定为 Servo0=0、Servo1/2/4=0/0/135（旧步骤1-5初始姿态）避免遮挡 K230D 视野；READY 停车后恢复 Servo0=95 并重新执行旧步骤1-5确认抓取姿态，PREPARE 在距墙 0.05 m 处重跑，前伸空间需实车确认。该入口只验证单次橙色抓取，不实现连续抓取、紫色方块、AprilTag 或 CompetitionRunner 接入。
+SEARCH 超过 `--search-timeout`（默认 10 s）或 K230D 超过 0.60 s 无有效数据会 STOP 并进入故障清理；K230D 串口断开时先用现有 close+connect 重连（默认 3 次、间隔 1 s，等待期间 REMOTE watchdog 会自行停住底盘），重连失败、STM32 `ERR`、协议超时和 Ctrl+C 均先尝试全局 STOP，再释放 STM32 与 K230D 连接。机械臂阶段停止读取 K230D，由已验证抓取动作独占 STM32 回复。撞墙与视觉阶段机械臂固定为 Servo0=0、Servo1/2/4=0/0/135（旧步骤1-5初始姿态）避免遮挡 K230D 视野；READY 停车后恢复 Servo0=95 并重新执行旧步骤1-5确认抓取姿态，PREPARE 在距墙 0.05 m 处重跑，前伸空间需实车确认。该入口只验证单次橙色抓取，不实现连续抓取、紫色方块、AprilTag 或 CompetitionRunner 接入。
 
 ### 6.5 STM32 入口
 
