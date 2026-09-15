@@ -144,8 +144,10 @@ class GrabMissionTests(unittest.TestCase):
         self.assertIs(result, MissionPhase.DONE)
         sent = _sent_commands(link)
         # Startup order: RIGHT preset comes after the safety STOP ACK.
-        self.assertEqual(sent[:3], [
+        self.assertEqual(sent[:5], [
             "NEXT_TURN,RIGHT",
+            "LINE_START",
+            "LINE_STOP",
             "LINE_START",
             "LINE_STOP",
         ])
@@ -169,7 +171,20 @@ class GrabMissionTests(unittest.TestCase):
                 PLACE_ARM_STEPS,
             ],
         )
-        line_stop_index = link.calls.index(("send", "LINE_STOP"))
+        line_stop_indices = [
+            index
+            for index, call in enumerate(link.calls)
+            if call == ("send", "LINE_STOP")
+        ]
+        line_start_indices = [
+            index
+            for index, call in enumerate(link.calls)
+            if call == ("send", "LINE_START")
+        ]
+        self.assertEqual(len(line_stop_indices), 2)
+        self.assertEqual(len(line_start_indices), 2)
+        turn_pause_index, wall_stop_index = line_stop_indices
+        _, wall_approach_start_index = line_start_indices
         prepare_index = link.calls.index(("arm", PREPARE_ARM_STEPS))
         pre_pick_settle_index = link.calls.index(
             ("arm", PRE_PICK_SETTLE_STEPS)
@@ -184,7 +199,9 @@ class GrabMissionTests(unittest.TestCase):
             for index, call in enumerate(link.calls)
             if call == ("send", "VEL,0.00,-0.80,0.00")
         ]
-        self.assertLess(line_stop_index, prepare_index)
+        self.assertLess(turn_pause_index, prepare_index)
+        self.assertLess(prepare_index, wall_approach_start_index)
+        self.assertLess(wall_approach_start_index, wall_stop_index)
         self.assertTrue(
             any(
                 prepare_index < index < pre_pick_settle_index
@@ -207,6 +224,9 @@ class GrabMissionTests(unittest.TestCase):
             "JUNCTION DETECTED",
             "TURN COMPLETE",
             "LINE REACQUIRED",
+            "Pause line following for arm preparation",
+            "Prepare arm before wall approach",
+            "Resume line following to wall",
             "Continue line following",
             "Wall reached by line following",
             "Prepare arm",
@@ -246,7 +266,7 @@ class GrabMissionTests(unittest.TestCase):
             any("=== MISSION ABORTED:" in line for line in output)
         )
 
-    def test_line_duration_starts_at_line_reacquired_event(self) -> None:
+    def test_line_duration_starts_when_line_follow_resumes_after_prepare(self) -> None:
         clock = FakeClock()
         link = FakeStm32Link(
             clock,
@@ -266,15 +286,43 @@ class GrabMissionTests(unittest.TestCase):
         with mock.patch("competition.grab_mission.execute_grab_steps"):
             run_grab_mission(link, output=lambda line: None, clock=clock)
 
-        line_stop_at = next(
+        line_start_times = [
+            timestamp
+            for timestamp, call in link.timed_calls
+            if call == ("send", "LINE_START")
+        ]
+        line_stop_times = [
             timestamp
             for timestamp, call in link.timed_calls
             if call == ("send", "LINE_STOP")
+        ]
+        wall_approach_started_at = line_start_times[-1]
+        wall_stop_at = line_stop_times[-1]
+        self.assertGreaterEqual(
+            wall_stop_at,
+            wall_approach_started_at + LINE_DURATION,
         )
-        # LINE_REACQUIRED is read at t=0.75.  Waiting for the later TURN_DONE
-        # must not restart the 3.22 s line-follow timer.
-        self.assertGreaterEqual(line_stop_at, 0.75 + LINE_DURATION)
-        self.assertLess(line_stop_at, 4.25)
+        self.assertLess(
+            wall_stop_at,
+            wall_approach_started_at + LINE_DURATION + 0.25,
+        )
+
+    def test_arm_prepare_failure_stops_without_resuming_line_follow(self) -> None:
+        clock = FakeClock()
+        link = FakeStm32Link(clock, list(JUNCTION_LINES))
+        link.is_connected = True
+
+        with mock.patch(
+            "competition.grab_mission.execute_grab_steps",
+            side_effect=Stm32ProtocolError("STM32 error: ERR,SERVO_SET"),
+        ):
+            with self.assertRaises(Stm32ProtocolError):
+                run_grab_mission(link, output=lambda line: None, clock=clock)
+
+        sent = _sent_commands(link)
+        self.assertEqual(sent.count("LINE_START"), 1)
+        self.assertEqual(sent.count("LINE_STOP"), 1)
+        self.assertIn(("stop", False), link.calls)
 
     def test_out_of_order_turn_event_before_junction_aborts(self) -> None:
         clock = FakeClock()

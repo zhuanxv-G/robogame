@@ -96,7 +96,7 @@ TaskController.reset_arm()
 
 对外部 STM32 工程的只读动作考古没有改变这一边界。`Core/Src/main.c` 的未调用 `Test_All()` 中有一个 `#if 0` 旧候选：Servo1/2/4 先到 0/0/135，底盘执行两段 `Move_Distance`，Stepper 以 800 pps 执行 +3000，Servo4 到 105、Servo2 到 15，再执行 -3000；底盘随后后退，Servo2 到 0、Servo1 以 10 ms/degree Sweep 到 93，最后 Stepper +5000、Servo4 到 135、Stepper -5000，各主要动作间保持原 500 ms 延时。它没有橙色或中间盒标注，也不在正式运行链中，并且包含不可忽略的底盘动作。
 
-该候选与当前 `ArmSequence.group1()` 的 Servo2、Servo1 和第二段 Stepper 参数明显不同，不能视为同一版本。操作者后续确认了其中机械臂动作可以工作，因此 `competition/grab_task.py` 将全部 24 个非底盘动作独立封装；`competition/grab_mission.py` 则在相应边界插入 0.05 m 和 0.30 m 后退。重捕后的 0.38 m LINE_FOLLOW 取代旧候选的前进定位，不能再叠加第二段正向 VEL。由于 STM32 烧录版本、Stepper 起始高度和后退速度仍未现场关联，这条固定路线仍须分阶段实测，且暂不接入 `CompetitionRunner -> TaskController -> ArmSequence`。
+该候选与当前 `ArmSequence.group1()` 的 Servo2、Servo1 和第二段 Stepper 参数明显不同，不能视为同一版本。操作者后续确认了其中机械臂动作可以工作，因此 `competition/grab_task.py` 将全部24个非底盘动作独立封装；`competition/grab_mission.py` 在右转重捕后先以 `LINE_STOP` 固定车辆，执行旧步骤1–5的 Servo1/2/4=0/0/135 前伸准备，再以 `LINE_START` 重新巡线0.38 m到墙，并在相应边界插入0.05 m和0.30 m后退。这样机械臂不会到墙后才展开，准备耗时也不会计入0.38 m巡线时间。由于STM32烧录版本、Stepper起始高度和后退速度仍未现场关联，这条固定路线仍须分阶段实测，且暂不接入 `CompetitionRunner -> TaskController -> ArmSequence`。
 
 ### 3.2 competition 视觉接近组件
 

@@ -10,7 +10,7 @@ RoboGame 是一套参加 RoboGame 2026 竞技组比赛的移动机器人系统�
 
 当前采用上下位机分工：Raspberry Pi 5 负责视觉结果处理、比赛状态和任务决策；STM32F407ZGT6 负责底盘、巡线、Servo 和 Stepper 的实时执行。K230D / CanMV 作为独立视觉协处理器，把目标检测结果发送给 Pi；Logitech C270 USB Camera 直接连接 Pi，用于 AprilTag 检测。
 
-项目已从单项硬件调试进入整车联调阶段，但还没有形成一条覆盖“启动—巡线—取橙色—取紫色—搭建”的全自动比赛主流程。2026-09-14 新增、2026-09-15 修正 `competition/grab_mission.py`（LINE_TO_GRAB_MISSION）：固定路线按巡线 0.38 m 到墙、机械臂准备、后退 0.05 m、抓取、抓起后再后退 0.30 m、放置执行；已经消除重复向墙前进 0.38 m 的危险流程（代码完成，待烧录/实车）。AprilTag、K230D 和比赛完整策略仍未接入该任务。
+项目已从单项硬件调试进入整车联调阶段，但还没有形成一条覆盖“启动—巡线—取橙色—取紫色—搭建”的全自动比赛主流程。2026-09-14 新增、2026-09-15 修正 `competition/grab_mission.py`（LINE_TO_GRAB_MISSION）：右转重捕后先停车执行旧步骤 1–5 的 Servo 前伸准备，再重新巡线 0.38 m 到墙、后退 0.05 m、抓取、抓起后后退 0.30 m并放置；已经消除抵墙后空间不足才展开机械臂以及重复向墙前进 0.38 m 两项危险流程（代码完成，待实车）。AprilTag、K230D 和比赛完整策略仍未接入该任务。
 
 ## 2. 当前目录结构
 
@@ -137,7 +137,7 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 | 巡线传感器现场采样 | 只读工具完成，已有真实数据 | `test_line_sensor_capture.py` 约 10 Hz 发送唯一允许命令 `LINE_STATUS`；已确认普通线 `0110`、左侧扩宽 `1110`、右侧扩宽 `0111` 和全黑 `1111`，工具不启动任何执行器 |
 | 路口协议与人工入口 | 软件完成，待烧录/实车 | `test_junction_turn.py` 支持直接指定动作，或由 start/target 规划路线并只取首个动作；严格输入 `START` 后才连接，`TURN_DONE` 后 STOP，不会连续跑多个路口 |
 | 巡线到抓取墙测试 | Pi 入口完成，待烧录/实车 | `test_line_to_wall.py` 使用现有协议执行启动 STOP、预设 RIGHT、LINE_START、等待首个 `JUNCTION_DETECTED` 和 `LINE_REACQUIRED`，再保持 LINE_FOLLOW 约 3.22 s 后 LINE_STOP；STM32 已补上 `0111 -> RIGHT`，尚未烧录 |
-| 巡线到抓取完整任务 | Pi 入口完成，待烧录/实车 | `competition/grab_mission.py` 在重捕后保持巡线 0.38 m 到墙并 LINE_STOP，不再额外向墙前进；随后准备机械臂、后退 0.05 m、抓取、后退 0.30 m、放置。全程 STOP/ERR/Ctrl+C 安全收尾，未实车 |
+| 巡线到抓取完整任务 | Pi 入口完成，待实车 | `competition/grab_mission.py` 在右转重捕后先 LINE_STOP，按旧步骤 1–5 设置 Servo1/2/4 为 0/0/135，再 LINE_START 巡线 0.38 m 到墙；随后后退 0.05 m、抓取、后退 0.30 m并放置。全程 STOP/ERR/Ctrl+C 安全收尾，未实车 |
 | competition 流程调度 | 第一版模拟流程完成 | `CompetitionRunner` 通过外部事件串联巡线、橙色目标接近、抓取、搭建和结束；默认 simulation mode 不调用硬件控制器 |
 | 机械臂任务控制 | 橙色抓取已封装，待接入控制器 | `TaskController.build()` 复用 `ArmSequence.run_all()`，`reset_arm()` 复用 `safe_home()`；新增 `competition/grab_task.py` 把已实机验证的旧版机械臂抓取动作封装为 `grab_orange()`，`TaskController.grab_orange()` 保持 NotImplemented，接线留待后续 |
 | 比赛入口 | 安全模拟入口完成 | `python -m competition.main` 初始化 CompetitionRunner，默认只打印 simulation/START 及子控制器状态，不连接或运行任何硬件 |
@@ -473,7 +473,7 @@ python3 -m competition.grab_mission
 
 `competition/grab_mission.py` 把已分别验证的巡线、路口和机械臂模块连接为第一条固定路线完整任务，不修改任何已有模块、测试脚本或 STM32 固件。`--dry-run` 只打印流程和参数，不打开串口；实机入口必须输入严格 `START` 才连接，单次执行后不自动循环。
 
-状态机依次为 `IDLE -> LINE_FOLLOW -> WAIT_JUNCTION -> TURNING -> LINE_REACQUIRED -> PREPARE_ARM -> BACKOFF -> PICK -> RETREAT -> PLACE -> DONE`；任意串口异常、STM32 `ERR`、协议错序或 Ctrl+C 进入 `ERROR`，先请求全局 STOP 再重新抛出。
+状态机依次为 `IDLE -> LINE_FOLLOW -> WAIT_JUNCTION -> TURNING -> PREPARE_ARM -> APPROACH_WALL -> BACKOFF -> PICK -> RETREAT -> PLACE -> DONE`；任意串口异常、STM32 `ERR`、协议错序或 Ctrl+C 进入 `ERROR`，先请求全局 STOP 再重新抛出。
 
 ```text
 STOP / ACK
@@ -481,15 +481,17 @@ STOP / ACK
   -> LINE_START / ACK
   -> JUNCTION_DETECTED
   -> TURN_STARTED,RIGHT -> TURN_DONE,RIGHT + LINE_REACQUIRED（两者顺序兼容，方向严格校验）
-  -> 保持 LINE_FOLLOW 约 3.22 s、共 0.38 m 到墙 -> LINE_STOP / ACK
-  -> 执行旧步骤 1-5 的机械臂准备
+  -> LINE_STOP / ACK，固定车辆
+  -> 执行旧步骤 1-5：等待 500 ms，Servo1=0、Servo2=0、Servo4=135，再等待 500 ms
+  -> LINE_START / ACK，重新进入 LINE_FOLLOW
+  -> 约 3.22 s、共 0.38 m 到墙 -> LINE_STOP / ACK
   -> VEL,0.00,-0.80,0.00 后撤约 0.42 s（0.05 m）-> STOP / ACK -> 等待 500 ms
   -> 下降、夹取、抬升
   -> VEL,0.00,-0.80,0.00 后撤约 2.54 s（0.30 m）-> STOP / ACK -> 等待 500 ms
   -> 放置、释放、收回 -> STOP / ACK
 ```
 
-参数集中在模块顶部：`TARGET_DISTANCE=0.38`、`REAL_SPEED=0.118`、`LINE_DURATION=TARGET_DISTANCE/REAL_SPEED`、`BACKOFF_DISTANCE=0.05`、`POST_PICK_RETREAT_DISTANCE=0.30`。0.38 m 只由重捕后的 LINE_FOLLOW 执行一次，不再发送正向 VEL；两个后退段使用 `VEL.Y=-0.80`、每 100 ms 刷新并在结束时等待 STOP ACK。后退实测速度尚未单独标定，暂沿用 0.118 m/s 前进基线，因此 0.05 m 和 0.30 m 距离仍需实车校准。该入口不导入 AprilTag、K230D，也没有新增 STM32 协议要求。
+参数集中在模块顶部：`TARGET_DISTANCE=0.38`、`REAL_SPEED=0.118`、`LINE_DURATION=TARGET_DISTANCE/REAL_SPEED`、`BACKOFF_DISTANCE=0.05`、`POST_PICK_RETREAT_DISTANCE=0.30`。重捕黑线后先停车准备机械臂；0.38 m计时从准备完成后重新发送 `LINE_START` 的时刻开始，因此机械臂调整耗时不会侵占巡线距离。0.38 m只由 LINE_FOLLOW 执行一次，不发送正向 VEL；两个后退段使用 `VEL.Y=-0.80`、每100 ms刷新并在结束时等待STOP ACK。后退实测速度尚未单独标定，暂沿用0.118 m/s前进基线。该入口不导入AprilTag、K230D，也没有新增STM32协议要求。
 
 ### 6.5 STM32 入口
 
@@ -585,7 +587,7 @@ Pi 工作区和 Git 历史中没有 `docs/STM32_PROJECT_MAP.md` 和 `docs/STM32_
 1. 烧录前人工复核 1500 ms / 20 次 / 8 次 / 3000 ms 四个检测参数，以及正 Omega 左转、负 Omega 右转符号、2.2 s/11.5 s 定时值和 2 s 搜索 timeout；保留当前固件以便回退。
 2. 先架空轮或安全支撑验证 STOP 能在 `ADVANCE_TO_CENTER`、`TURN_LEFT`、`TURN_RIGHT`、`SEARCH_LINE` 任一阶段立即急停，并验证 `1110 -> LEFT`、`0111 -> RIGHT`、全黑加 `NEXT_TURN,RIGHT -> RIGHT` 的事件方向。
 3. 再进入低风险场地，依次完成平路直线连续 10 分钟无误触发、上坡扰动不误触发、左右真实 T 都能完整输出 `JUNCTION_DETECTED -> ADVANCE -> TURN -> SEARCH -> LINE_REACQUIRED`；记录传感器序列、实际前进距离、左右转角和重捕用时。
-4. 单 T 左右转稳定后使用 `test_line_to_wall.py` 验证右转重捕后仅巡线一次 0.38 m 到墙；随后分阶段验证机械臂准备、0.05 m 后退、抓取、0.30 m 后退和放置，全部单项安全后才运行 `competition/grab_mission.py`。两个后退段应分别测量实际速度，不能直接把当前 0.118 m/s 前进基线视为最终标定。STRAIGHT 和多路口 RouteExecutor 组合仍需另行恢复/验证。
+4. 单 T 左右转稳定后，分阶段验证“右转重捕 -> LINE_STOP -> Servo1/2/4=0/0/135 -> LINE_START -> 巡线0.38 m到墙”，确认机械臂在靠墙前已经取得足够空间；再验证0.05 m后退、抓取、0.30 m后退和放置，全部单项安全后才运行 `competition/grab_mission.py`。两个后退段应分别测量实际速度，不能直接把当前0.118 m/s前进基线视为最终标定。STRAIGHT和多路口RouteExecutor组合仍需另行恢复/验证。
 5. 多路口与最终 Tag 到站稳定后，再设计 RouteExecutor 接入 CompetitionRunner 的事件和 live 生命周期；当前 `competition/main.py` 继续固定 simulation mode。
 6. 继续单独处理普通 LINE_FOLLOW 下持续 `0000` 和近距离 Tag 移出画面的安全风险，并现场测量 Tag、T 字路口和停车点；本轮未改变 AprilTag 算法或坐标 TODO。
 

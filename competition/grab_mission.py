@@ -5,8 +5,9 @@ one fixed-route task without changing any of them:
 
 * The STM32 LineNav start, junction events and RIGHT turn reacquisition
   follow the operator-confirmed flow of ``tests/test_line_to_wall.py``.
-* The post-reacquire timed line follow is the measured 0.38 m path to the
-  wall.  It is not followed by a second forward VEL segment.
+* Immediately after RIGHT turn reacquisition, LineNav is paused while the old
+  Servo1/2/4 preparation steps run.  LineNav is then restarted for the
+  measured 0.38 m path to the wall; there is no forward VEL segment.
 * The old 0.05 m pre-pick backoff and 0.30 m post-pick retreat reuse the
   refreshed VEL pattern of ``tests/test_old_grab_sequence.py`` (REMOTE
   watchdog = 1000 ms, so commands are refreshed every 100 ms).
@@ -19,8 +20,8 @@ Mission flow (one explicit state per phase)::
     LINE_FOLLOW     LINE_START / ACK -> JUNCTION_DETECTED
     WAIT_JUNCTION   TURN_STARTED,RIGHT
     TURNING         TURN_DONE,RIGHT + LINE_REACQUIRED (either order)
-    LINE_REACQUIRED timed line follow 0.38 m to wall -> LINE_STOP / ACK
-    PREPARE_ARM     old arm preparation steps
+    PREPARE_ARM     LINE_STOP -> old arm preparation -> LINE_START
+    APPROACH_WALL   timed line follow 0.38 m to wall -> LINE_STOP / ACK
     BACKOFF         VEL backward 0.05 m -> STOP / ACK -> old 500 ms wait
     PICK            lower, close and lift
     RETREAT         VEL backward 0.30 m -> STOP / ACK -> old 500 ms wait
@@ -28,8 +29,9 @@ Mission flow (one explicit state per phase)::
     DONE            mission success
     ERROR           any exception: best-effort STOP, then re-raise
 
-Safety: a global STOP is requested with ACK before any motion, after every
-timed VEL segment and by the arm task itself.  Any serial failure, STM32
+Safety: a global STOP is requested with ACK before any motion, LineNav is
+stopped while the arm prepares, and every timed VEL segment ends in STOP.
+Any serial failure, STM32
 ``ERR`` reply, protocol anomaly or Ctrl+C enters the ERROR state, requests a
 best-effort STOP and re-raises the original exception.  This module never
 modifies the STM32 firmware, ``grab_task.py`` or the existing test scripts.
@@ -97,8 +99,8 @@ class MissionPhase(str, Enum):
     LINE_FOLLOW = "LINE_FOLLOW"
     WAIT_JUNCTION = "WAIT_JUNCTION"
     TURNING = "TURNING"
-    LINE_REACQUIRED = "LINE_REACQUIRED"
     PREPARE_ARM = "PREPARE_ARM"
+    APPROACH_WALL = "APPROACH_WALL"
     BACKOFF = "BACKOFF"
     PICK = "PICK"
     RETREAT = "RETREAT"
@@ -122,14 +124,14 @@ class GrabMissionController:
         self._clock = clock
         self._phase = MissionPhase.IDLE
         self._turn_deadline: float | None = None
-        self._line_reacquired_at: float | None = None
+        self._wall_line_follow_started_at: float | None = None
         self._handlers: dict[MissionPhase, Callable[[], None]] = {
             MissionPhase.IDLE: self._phase_startup,
             MissionPhase.LINE_FOLLOW: self._phase_line_follow,
             MissionPhase.WAIT_JUNCTION: self._phase_wait_junction,
             MissionPhase.TURNING: self._phase_turning,
-            MissionPhase.LINE_REACQUIRED: self._phase_line_reacquired,
             MissionPhase.PREPARE_ARM: self._phase_prepare_arm,
+            MissionPhase.APPROACH_WALL: self._phase_approach_wall,
             MissionPhase.BACKOFF: self._phase_backoff,
             MissionPhase.PICK: self._phase_pick,
             MissionPhase.RETREAT: self._phase_retreat,
@@ -252,22 +254,39 @@ class GrabMissionController:
                     raise Stm32ProtocolError("Duplicate LINE_REACQUIRED")
                 self._output("LINE REACQUIRED")
                 reacquired_seen = True
-                self._line_reacquired_at = self._clock()
             elif line.startswith("TURN_STARTED,"):
                 raise Stm32ProtocolError(f"Duplicate TURN_STARTED: {line}")
             if turn_done_seen and reacquired_seen:
-                self._set_phase(MissionPhase.LINE_REACQUIRED)
+                self._set_phase(MissionPhase.PREPARE_ARM)
                 return
         raise TimeoutError(
             "Timeout waiting for: TURN_DONE and LINE_REACQUIRED"
         )
 
-    def _phase_line_reacquired(self) -> None:
-        """Timed line follow to the grab area, keeping the heading on the line."""
+    def _phase_prepare_arm(self) -> None:
+        """Pause after the turn and extend the arm before approaching the wall."""
+        self._output("")
+        self._output("Pause line following for arm preparation")
+        self._send_with_ack("LINE_STOP")
+        self._output("")
+        self._output("Prepare arm before wall approach")
+        execute_grab_steps(
+            self._stm32,
+            PREPARE_ARM_STEPS,
+            output=self._output,
+            clock=self._clock,
+        )
+        self._output("Resume line following to wall")
+        self._wall_line_follow_started_at = self._clock()
+        self._send_with_ack("LINE_START")
+        self._set_phase(MissionPhase.APPROACH_WALL)
+
+    def _phase_approach_wall(self) -> None:
+        """Follow the line for 0.38 m with the arm already prepared."""
         self._output("Continue line following")
-        assert self._line_reacquired_at is not None
+        assert self._wall_line_follow_started_at is not None
         self._output(f"Duration: {LINE_DURATION:.2f}s")
-        deadline = self._line_reacquired_at + LINE_DURATION
+        deadline = self._wall_line_follow_started_at + LINE_DURATION
         while self._clock() < deadline:
             line = self._read_protocol_line()
             if line is None:
@@ -280,21 +299,9 @@ class GrabMissionController:
         self._output("LINE_STOP")
         self._send_with_ack("LINE_STOP")
         self._output("Wall reached by line following")
-        self._set_phase(MissionPhase.PREPARE_ARM)
+        self._set_phase(MissionPhase.BACKOFF)
 
     # --- old candidate around the chassis-move boundaries ---
-
-    def _phase_prepare_arm(self) -> None:
-        """Prepare the arm only after LineNav has stopped at the wall."""
-        self._output("")
-        self._output("Prepare arm")
-        execute_grab_steps(
-            self._stm32,
-            PREPARE_ARM_STEPS,
-            output=self._output,
-            clock=self._clock,
-        )
-        self._set_phase(MissionPhase.BACKOFF)
 
     def _phase_backoff(self) -> None:
         """VEL backward for BACKOFF_TIME to leave grab clearance."""
@@ -513,8 +520,9 @@ def _print_plan(output: Callable[[str], object]) -> None:
     output(f"junction_action={EXPECTED_TURN.value}")
     output(
         "Flow: STOP -> NEXT_TURN,RIGHT -> LINE_START -> "
-        "JUNCTION_DETECTED -> TURN -> LINE_REACQUIRED -> timed line follow "
-        "0.38m to wall -> LINE_STOP -> prepare arm -> backoff 0.05m -> "
+        "JUNCTION_DETECTED -> TURN -> LINE_REACQUIRED -> LINE_STOP -> "
+        "prepare arm -> LINE_START -> timed line follow 0.38m to wall -> "
+        "LINE_STOP -> backoff 0.05m -> "
         "pick -> retreat 0.30m -> place -> STOP"
     )
 
