@@ -4,13 +4,13 @@ The robot must be placed at the grab area facing the wall.  The script first
 replays the verified fixed-position flow of ``tests/test_old_grab_sequence.py``
 (wall approach, backoff), then hands chassis positioning to the K230D:
 
-    Servo0=0 机械臂转离摄像头视野 -> 撞墙 0.50 m -> 后撤 0.05 m 到视觉抓取位置
+    Servo0=0 + 旧步骤1-5 固定初始姿态 -> 撞墙 0.50 m -> 后撤 0.05 m 到视觉抓取位置
     -> SEARCH -> ALIGN -> READY (STOP ACK)
     -> 恢复 Servo0=95 -> PREPARE_ARM -> PICK -> 后撤 0.30 m -> PLACE -> 静止姿态
 
-During the wall approach and the visual phase the arm base (Servo0) is held
-at 0 deg so the arm stays out of the K230D field of view: the old PREPARE
-pose fills the whole image.  Once READY is confirmed, Servo0 returns to the
+Before the wall approach the initial arm pose is fixed: Servo0 at 0 deg (the
+base turned away from the K230D) plus the old steps 1-5 angles
+(Servo1/2/4 = 0/0/135).  Once READY is confirmed, Servo0 returns to the
 verified grab baseline (95 deg) and the previously used arm process
 (PREPARE_ARM -> PICK -> PLACE) runs unchanged.
 
@@ -459,7 +459,7 @@ def _print_plan(
         f"({retreat_time:.2f} s)"
     )
     output(
-        "流程: Servo0=0转离视野 -> 撞墙 -> 后撤到视觉位置 -> "
+        "流程: 初始姿态(Servo0=0+旧步骤1-5) -> 撞墙 -> 后撤到视觉位置 -> "
         "SEARCH -> ALIGN -> READY(STOP) -> Servo0=95恢复基线 -> "
         "PREPARE_ARM -> PICK -> 后撤0.30m -> PLACE -> 静止姿态 -> STOP"
     )
@@ -515,15 +515,25 @@ def run_test(
         )
         output(f"RX: {stop_ack}")
 
-        # --- 视觉阶段前：Servo0 归 0，机械臂转离 K230D 视野 ---
-        # 旧序列在撞墙前就前伸机械臂，该姿态会填满摄像头画面，因此
-        # 撞墙与视觉阶段把底座转到 0 度，抓取开始前再恢复已验证姿态。
+        # --- 视觉阶段前：固定初始舵机姿态，机械臂转离 K230D 视野 ---
+        # Servo0=0 使底座转离摄像头；Servo1/2/4 沿用旧序列开头
+        # （旧步骤1-5）的角度 0/0/135。抓取开始前恢复 Servo0 并重新
+        # 执行 PREPARE_ARM，确认已验证抓取姿态。
         output("")
         output(
-            f"=== Servo0 -> {VISUAL_SERVO0_ANGLE} 度（机械臂转离视野） ==="
+            f"=== 初始舵机姿态：Servo0 -> {VISUAL_SERVO0_ANGLE} 度 ==="
         )
         ack = stm32.servo_set(0, VISUAL_SERVO0_ANGLE, timeout=ACK_TIMEOUT_S)
         output(f"RX: {ack}")
+
+        output("")
+        output("=== 初始舵机姿态：Servo1/2/4 = 0/0/135（旧步骤1-5） ===")
+        execute_grab_steps(
+            stm32,
+            PREPARE_ARM_STEPS,
+            output=output,
+            clock=clock,
+        )
 
         output("")
         output(f"=== 撞墙定位 ({WALL_APPROACH_DISTANCE:.2f} m) ===")
