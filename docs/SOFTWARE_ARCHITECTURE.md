@@ -58,8 +58,8 @@ Logitech C270 ──USB Video───┼──> Raspberry Pi 5
 | 机械动作 | `arm_sequence.py` | 已验证的三组搭建动作 | 已接入局部主控 |
 | 独立入口 | `build_sequence.py` | 单独回归机械臂完整动作 | 已实机使用 |
 | 启动准备入口 | `robot_startup.py` | HELLO 后按 `-1500 @ 800 pps` 将升降轴相对上移一次 | 人工单次运行；不是 Homing，不接入比赛状态机 |
-| 左盒放置入口 | `tests/test_old_grab_left_sequence.py` | 已抓取物块按 Servo0=0 放入左盒 | 人工单次运行；待实机验证，不接入比赛状态机 |
-| 右盒放置入口 | `tests/test_old_grab_right_sequence.py` | 已抓取物块按 Servo0=180 放入右盒 | 人工单次运行；待实机验证，不接入比赛状态机 |
+| 左盒完整抓放入口 | `tests/test_old_grab_left_sequence.py` | 到墙抓取、后撤并按 Servo0=0 放入左盒 | 人工单次运行；待实机验证，不接入比赛状态机 |
+| 右盒完整抓放入口 | `tests/test_old_grab_right_sequence.py` | 到墙抓取、后撤并按 Servo0=180 放入右盒 | 人工单次运行；待实机验证，不接入比赛状态机 |
 
 ## 3. 当前实际运行链路
 
@@ -365,6 +365,7 @@ build_sequence.py
 tests/test_old_grab_left_sequence.py
   -> 打开 STM32并执行 HELLO_STM32,1
   -> 等待操作者单独按 ENTER
+  -> 旧步骤1-18：前伸 -> 前进0.50m -> 后退0.05m -> 抓取 -> 后退0.30m
   -> Servo2=180 -> Servo0=0 -> Servo1 Sweep_To(170,10)
   -> Stepper +5000 -> Servo4=135 -> Stepper -5000
   -> STOP / 关闭串口
@@ -372,6 +373,7 @@ tests/test_old_grab_left_sequence.py
 tests/test_old_grab_right_sequence.py
   -> 打开 STM32并执行 HELLO_STM32,1
   -> 等待操作者单独按 ENTER
+  -> 旧步骤1-18：前伸 -> 前进0.50m -> 后退0.05m -> 抓取 -> 后退0.30m
   -> Servo2=180 -> Servo0=180 -> Servo1 Sweep_To(170,10)
   -> Stepper +5000 -> Servo4=135 -> Stepper -5000
   -> STOP / 关闭串口
@@ -379,7 +381,7 @@ tests/test_old_grab_right_sequence.py
 
 `robot_startup.py` 复用 `hardware.stm32_link.Stm32Link`，不自行创建串口协议实现。它只用于人工启动前机械臂预升高，不是真正 Homing：升降轴没有限位开关或编码器，脚本无法判断绝对高度，重复运行会继续向上移动。连接、HELLO、Stepper、ERR 或 Ctrl+C 异常均退出，并在连接仍有效时执行 best-effort STOP。该入口不会被 `CompetitionRunner`、`MissionController` 或任何自动比赛流程调用。
 
-左右盒脚本只用于物块已经抓稳并抬起后的放置测试，不执行抓取或底盘动作。它们通过 `Stm32Link` 向 `ArmSequence` 提供唯一串口连接，复用已有 HELLO、Servo Set/Sweep、Stepper 和 STOP 实现；左/右动作仅在 Servo0 的 0/180 角度上不同。Stepper 沿用 800 pps，并分别等待 ACK 和 MOVE_DONE；任意 ERR、通信异常或 Ctrl+C 都进入 best-effort STOP 和串口释放。两个脚本均未被 competition 状态机或其他自动入口导入。
+左右盒脚本通过 `Stm32Link` 向 `ArmSequence` 提供唯一串口连接。两者直接复用 `test_old_grab_sequence.py` 的旧步骤1–18和开环底盘距离实现，先完成到墙、后撤、抓取、收回及第二次后撤，再执行目标盒放置；左/右放置仅在Servo0的0/180角度上不同。Stepper沿用800 pps，并分别等待ACK和MOVE_DONE；任意ERR、通信异常或Ctrl+C都进入best-effort STOP和串口释放。两个脚本均未被competition状态机或其他自动入口导入。
 
 这些入口用于机械臂回归和分组调试，不应和整车主控同时运行。
 

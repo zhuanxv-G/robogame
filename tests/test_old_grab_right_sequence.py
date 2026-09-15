@@ -1,21 +1,33 @@
 #!/usr/bin/env python3
-"""Manually test placing an already-grabbed block into the right box."""
+"""Run the complete old grab flow and place the block in the right box.
+
+The first 18 source actions are reused from ``test_old_grab_sequence.py``:
+prepare the arm, drive to the wall, back off, pick, retract, and retreat. The
+old middle-box placement is replaced with the provided right-box placement.
+Importing this module never opens the UART or moves hardware.
+"""
 
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 from pathlib import Path
-from typing import Callable
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+TESTS_DIR = Path(__file__).resolve().parent
+for import_path in (PROJECT_ROOT, TESTS_DIR):
+    if str(import_path) not in sys.path:
+        sys.path.insert(0, str(import_path))
 
 from arm_sequence import ArmSequence
 from hardware.stm32_link import Stm32Link
+import test_old_grab_sequence as old_grab
 
+
+# Preserve preparation, wall approach, pick and retreat (old steps 1-18).
+GRAB_AND_RETREAT_ACTIONS = old_grab.OLD_SEQUENCE[:18]
 
 SERVO_2_PLACE_ANGLE = 180
 SERVO_0_RIGHT_ANGLE = 180
@@ -27,11 +39,78 @@ SERVO_4_RELEASE_ANGLE = 135
 ACTION_DELAY_S = 0.5
 
 
-def run_right_placement(
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Complete old grab flow with right-box placement."
+    )
+    parser.add_argument(
+        "--command-speed",
+        type=old_grab._command_speed,
+        default=old_grab.DEFAULT_COMMAND_SPEED_M_S,
+        metavar="M_S",
+        help="absolute VEL.Y command used for chassis moves",
+    )
+    parser.add_argument(
+        "--forward-actual-speed",
+        type=old_grab._positive_speed,
+        default=old_grab.DEFAULT_FORWARD_ACTUAL_SPEED_M_S,
+        metavar="M_S",
+        help="measured forward physical speed used for distance timing",
+    )
+    parser.add_argument(
+        "--backward-actual-speed",
+        type=old_grab._positive_speed,
+        default=old_grab.DEFAULT_BACKWARD_ACTUAL_SPEED_M_S,
+        metavar="M_S",
+        help="measured backward physical speed used for distance timing",
+    )
+    return parser.parse_args()
+
+
+def execute_grab_and_retreat(
+    stm32: Stm32Link,
     arm: ArmSequence,
-    sleep_fn: Callable[[float], None] = time.sleep,
+    args: argparse.Namespace,
 ) -> None:
-    """Run the STM32-derived right-box placement sequence."""
+    """Execute old source steps 1-18 in their original order."""
+    for action in GRAB_AND_RETREAT_ACTIONS:
+        label = old_grab._step_label(action.step)
+        print(f"[{label}] 原动作: {action.description}")
+
+        if action.kind is old_grab.ActionKind.DELAY:
+            old_grab._guarded_delay(
+                stm32,
+                float(action.values[0]),
+                label=label,
+                output=print,
+            )
+        elif action.kind is old_grab.ActionKind.SERVO:
+            index, angle = (int(value) for value in action.values)
+            arm.servo_set(index, angle)
+        elif action.kind is old_grab.ActionKind.STEPPER:
+            steps, pps = (int(value) for value in action.values)
+            arm.stepper_move(steps, pps)
+        elif action.kind is old_grab.ActionKind.CHASSIS_DISTANCE:
+            old_grab._drive_distance_open_loop(
+                stm32,
+                action,
+                command_speed=args.command_speed,
+                forward_actual_speed=args.forward_actual_speed,
+                backward_actual_speed=args.backward_actual_speed,
+                output=print,
+                clock=time.monotonic,
+            )
+        else:
+            raise RuntimeError(
+                f"unexpected action in grab prefix: {action.kind}"
+            )
+
+
+def execute_right_placement(
+    stm32: Stm32Link,
+    arm: ArmSequence,
+) -> None:
+    """Place the held block in the right box in the required order."""
     print("\nRIGHT BOX PLACEMENT")
 
     arm.servo_set(2, SERVO_2_PLACE_ANGLE)
@@ -41,16 +120,34 @@ def run_right_placement(
         SERVO_1_PLACE_ANGLE,
         SERVO_1_SWEEP_STEP_DELAY_MS,
     )
-    sleep_fn(ACTION_DELAY_S)
+    old_grab._guarded_delay(
+        stm32,
+        ACTION_DELAY_S,
+        label="右盒放置/Servo就位",
+        output=print,
+    )
 
     arm.stepper_move(STEPPER_PLACE_STEPS, STEPPER_PPS)
-    sleep_fn(ACTION_DELAY_S)
-
+    old_grab._guarded_delay(
+        stm32,
+        ACTION_DELAY_S,
+        label="右盒放置/下降完成",
+        output=print,
+    )
     arm.servo_set(4, SERVO_4_RELEASE_ANGLE)
-    sleep_fn(ACTION_DELAY_S)
-
+    old_grab._guarded_delay(
+        stm32,
+        ACTION_DELAY_S,
+        label="右盒放置/释放完成",
+        output=print,
+    )
     arm.stepper_move(-STEPPER_PLACE_STEPS, STEPPER_PPS)
-    sleep_fn(ACTION_DELAY_S)
+    old_grab._guarded_delay(
+        stm32,
+        ACTION_DELAY_S,
+        label="右盒放置/回升完成",
+        output=print,
+    )
 
 
 def _try_stop(arm: ArmSequence | None) -> None:
@@ -64,32 +161,36 @@ def _try_stop(arm: ArmSequence | None) -> None:
 
 
 def main() -> int:
+    args = parse_args()
     stm32: Stm32Link | None = None
     arm: ArmSequence | None = None
 
-    print("Old grab right-box placement test")
-    print("WARNING: the block must already be gripped and raised.")
+    print("Complete old grab and right-box placement test")
+    print("WARNING: this test moves the chassis, Servo and Stepper.")
+    print("WARNING: clear the route to the wall and prepare emergency stop.")
+    print(f"command_speed={args.command_speed:.2f}")
+    print(f"forward_actual_speed={args.forward_actual_speed:.3f} m/s")
+    print(f"backward_actual_speed={args.backward_actual_speed:.3f} m/s")
 
     try:
         print("Connecting STM32...")
-        stm32 = Stm32Link(timeout=0.1)
+        stm32 = Stm32Link(timeout=old_grab.SERIAL_POLL_TIMEOUT_S)
         stm32.connect()
         print("STM32 connected")
 
         arm = ArmSequence(stm32)
         arm.hello()
 
-        confirmation = input("Press ENTER to start")
-        if confirmation:
+        if input("Press ENTER to start"):
             print("Cancelled: ENTER was not pressed alone.")
             return 2
 
-        # Clear any chassis motion before starting the arm-only test.
         arm.stop(require_ack=True)
-        run_right_placement(arm)
+        execute_grab_and_retreat(stm32, arm, args)
+        execute_right_placement(stm32, arm)
         arm.stop(require_ack=True)
 
-        print("\nRIGHT BOX TEST FINISHED")
+        print("\nRIGHT BOX COMPLETE TEST FINISHED")
         return 0
     except KeyboardInterrupt:
         print("\nInterrupted by Ctrl+C.", file=sys.stderr)
@@ -101,8 +202,11 @@ def main() -> int:
         return 1
     finally:
         if stm32 is not None:
-            stm32.close()
-            print("STM32 serial closed")
+            try:
+                stm32.close()
+                print("STM32 serial closed")
+            except Exception as exc:
+                print(f"STM32 close failed: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":
