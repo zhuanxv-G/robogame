@@ -6,7 +6,9 @@ import unittest
 from collections import deque
 
 from competition.grab_task import (
+    GRAB_REST_SERVO_ANGLES,
     GRAB_SEQUENCE,
+    REST_ARM_STEPS,
     execute_grab_steps,
     grab_orange,
 )
@@ -78,7 +80,7 @@ class FakeStm32Link:
 
 
 class GrabTaskTests(unittest.TestCase):
-    def test_sequence_matches_every_non_chassis_old_action_in_order(self) -> None:
+    def test_sequence_keeps_old_actions_then_appends_rest_pose(self) -> None:
         expected = [
             action.description
             for action in OLD_SEQUENCE
@@ -87,7 +89,19 @@ class GrabTaskTests(unittest.TestCase):
         actual = [step.source for step in GRAB_SEQUENCE]
 
         self.assertEqual(len(expected), 24)
-        self.assertEqual(actual, expected)
+        self.assertEqual(actual[:len(expected)], expected)
+        self.assertEqual(
+            tuple(GRAB_SEQUENCE[-len(REST_ARM_STEPS):]),
+            REST_ARM_STEPS,
+        )
+        self.assertEqual(
+            tuple(
+                (int(step.values[0]), int(step.values[1]))
+                for step in REST_ARM_STEPS
+                if step.kind.value == "servo"
+            ),
+            tuple(enumerate(GRAB_REST_SERVO_ANGLES)),
+        )
 
     def test_complete_task_logs_ack_done_and_uses_two_safety_stops(self) -> None:
         clock = FakeClock()
@@ -124,6 +138,15 @@ class GrabTaskTests(unittest.TestCase):
         self.assertTrue(any("RX DONE: STEPPER_MOVE_DONE" in line for line in output))
         self.assertTrue(any("Settle after backoff" in line for line in output))
         self.assertTrue(any("Settle after retreat" in line for line in output))
+        servo_calls = [
+            (call[1], call[2])
+            for call in link.calls
+            if isinstance(call, tuple) and call[0] == "servo_set"
+        ]
+        self.assertEqual(
+            servo_calls[-5:],
+            list(enumerate(GRAB_REST_SERVO_ANGLES)),
+        )
 
     def test_async_err_requests_emergency_stop(self) -> None:
         clock = FakeClock()

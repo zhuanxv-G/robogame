@@ -25,6 +25,7 @@ from competition.grab_task import (
     PREPARE_ARM_STEPS,
     PRE_PICK_SETTLE_STEPS,
     PRE_PLACE_SETTLE_STEPS,
+    REST_ARM_STEPS,
 )
 
 
@@ -169,6 +170,7 @@ class GrabMissionTests(unittest.TestCase):
                 PICK_ARM_STEPS,
                 PRE_PLACE_SETTLE_STEPS,
                 PLACE_ARM_STEPS,
+                REST_ARM_STEPS,
             ],
         )
         line_stop_indices = [
@@ -194,6 +196,7 @@ class GrabMissionTests(unittest.TestCase):
             ("arm", PRE_PLACE_SETTLE_STEPS)
         )
         place_index = link.calls.index(("arm", PLACE_ARM_STEPS))
+        rest_index = link.calls.index(("arm", REST_ARM_STEPS))
         backward_vel_indices = [
             index
             for index, call in enumerate(link.calls)
@@ -217,6 +220,7 @@ class GrabMissionTests(unittest.TestCase):
         )
         self.assertLess(pick_index, retreat_settle_index)
         self.assertLess(retreat_settle_index, place_index)
+        self.assertLess(place_index, rest_index)
         for expected in (
             "=== GRAB MISSION START ===",
             "START LINE FOLLOW",
@@ -234,7 +238,7 @@ class GrabMissionTests(unittest.TestCase):
             "Pick object",
             "Post-pick retreat 30cm",
             "Place object",
-            "Grab and placement complete",
+            "Grab, placement and rest pose complete",
             "=== MISSION SUCCESS ===",
         ):
             self.assertTrue(
@@ -424,7 +428,8 @@ class GrabMissionTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertIn("connect", link.calls)
-        self.assertEqual(arm_spy.call_count, 5)
+        # Prepare, pre-pick settle, pick, pre-place settle, place, rest.
+        self.assertEqual(arm_spy.call_count, 6)
         # main closes the link it created, even on the success path.
         self.assertEqual(link.calls[-1], "close")
         self.assertFalse(link.is_connected)

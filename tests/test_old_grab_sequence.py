@@ -39,6 +39,14 @@ MAX_COMMAND_SPEED_M_S = 0.80
 DEFAULT_FORWARD_ACTUAL_SPEED_M_S = 0.118
 DEFAULT_BACKWARD_ACTUAL_SPEED_M_S = 0.118
 VELOCITY_REFRESH_S = 0.10
+REST_SETTLE_S = 0.5
+GRAB_REST_SERVO_ANGLES: tuple[tuple[int, int], ...] = (
+    (0, 95),
+    (1, 135),
+    (2, 90),
+    (3, 95),
+    (4, 90),
+)
 
 
 class ActionKind(str, Enum):
@@ -205,6 +213,7 @@ def _print_plan(output: Callable[[str], object]) -> None:
         output(
             f"  [{_step_label(action.step)}] {action.description}{suffix}"
         )
+    output("  [抓取结束静止姿态] Servo0..4 = 95,135,90,95,90")
 
 
 def _raise_on_err(line: str) -> None:
@@ -448,6 +457,31 @@ def execute_old_sequence(
             raise RuntimeError(f"unsupported action kind: {action.kind}")
 
 
+def execute_grab_rest_pose(
+    stm32: Stm32Link,
+    *,
+    output: Callable[[str], object] = print,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
+    """Move every Servo to the configured post-grab resting angle."""
+    output("[抓取结束静止姿态] 开始复位: Servo0..4 = 95,135,90,95,90")
+    for index, angle in GRAB_REST_SERVO_ANGLES:
+        _send_ack_only(
+            stm32,
+            f"SERVO_SET,{index},{angle}",
+            label=f"抓取结束静止姿态/Servo{index}",
+            output=output,
+        )
+    _guarded_delay(
+        stm32,
+        REST_SETTLE_S,
+        label="抓取结束静止姿态/稳定等待",
+        output=output,
+        clock=clock,
+    )
+    output("[抓取结束静止姿态] 完成")
+
+
 def _request_stop(
     stm32: Stm32Link,
     *,
@@ -549,13 +583,18 @@ def run_test(
             output=output,
             clock=clock,
         )
+        execute_grab_rest_pose(
+            stm32,
+            output=output,
+            clock=clock,
+        )
         _request_stop(
             stm32,
             label="完成保护",
             output=output,
             require_ack=True,
         )
-        output("旧版候选的可表达机械臂动作执行完成。")
+        output("旧版候选动作完成，机械臂已进入抓取结束静止姿态。")
         return 0
     except KeyboardInterrupt:
         _emergency_stop(stm32, reason="Ctrl+C", output=output)

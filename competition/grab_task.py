@@ -10,7 +10,8 @@ Scope of the packaging:
 * The arm actions were verified on the real robot with
   ``tests/test_old_grab_sequence.py``.
 * Servo angles, Stepper steps/pps, delays and their order are kept exactly
-  as verified; do not tune parameters here.
+  as verified. After those actions, the arm is moved to the configured
+  grab-task rest pose requested for Servo0..4.
 * The three chassis ``Robot.Move_Distance`` steps of the old candidate are
   intentionally excluded: in the test they are open-loop VEL time estimates
   rather than verified arm motion, and chassis positioning belongs to the
@@ -47,6 +48,8 @@ STEPPER_PPS = 800
 ACTION_DELAY_S = 0.5
 SWEEP_STEP_DELAY_S = 0.01
 SERIAL_POLL_TIMEOUT_S = 0.01
+REST_SETTLE_S = 0.5
+GRAB_REST_SERVO_ANGLES: tuple[int, ...] = (95, 135, 90, 95, 90)
 
 
 class ArmStepKind(str, Enum):
@@ -138,15 +141,32 @@ PLACE_ARM_STEPS: tuple[ArmStep, ...] = (
             "HAL_Delay(500)"),
 )
 
+REST_ARM_STEPS: tuple[ArmStep, ...] = (
+    ArmStep("Return arm to rest", ArmStepKind.SERVO, (0, 95),
+            "Grab rest pose: Servo[0].Set_Angle(95)"),
+    ArmStep("Return arm to rest", ArmStepKind.SERVO, (1, 135),
+            "Grab rest pose: Servo[1].Set_Angle(135)"),
+    ArmStep("Return arm to rest", ArmStepKind.SERVO, (2, 90),
+            "Grab rest pose: Servo[2].Set_Angle(90)"),
+    ArmStep("Return arm to rest", ArmStepKind.SERVO, (3, 95),
+            "Grab rest pose: Servo[3].Set_Angle(95)"),
+    ArmStep("Return arm to rest", ArmStepKind.SERVO, (4, 90),
+            "Grab rest pose: Servo[4].Set_Angle(90)"),
+    ArmStep("Return arm to rest", ArmStepKind.DELAY, (REST_SETTLE_S,),
+            "Grab rest pose settle (500 ms)"),
+)
+
 # Every non-chassis source action, including the waits immediately following
 # the two omitted chassis moves, is represented in its original relative
-# order.  The integrated mission inserts its chassis moves at those boundaries.
+# order. The configured rest pose is appended only after all old actions.
+# The integrated mission inserts its chassis moves at those boundaries.
 GRAB_SEQUENCE: tuple[ArmStep, ...] = (
     PREPARE_ARM_STEPS
     + PRE_PICK_SETTLE_STEPS
     + PICK_ARM_STEPS
     + PRE_PLACE_SETTLE_STEPS
     + PLACE_ARM_STEPS
+    + REST_ARM_STEPS
 )
 
 

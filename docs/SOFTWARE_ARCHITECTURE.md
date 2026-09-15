@@ -58,8 +58,8 @@ Logitech C270 ──USB Video───┼──> Raspberry Pi 5
 | 机械动作 | `arm_sequence.py` | 已验证的三组搭建动作 | 已接入局部主控 |
 | 独立入口 | `build_sequence.py` | 单独回归机械臂完整动作 | 已实机使用 |
 | 启动准备入口 | `robot_startup.py` | HELLO 后按 `-1500 @ 800 pps` 将升降轴相对上移一次 | 人工单次运行；不是 Homing，不接入比赛状态机 |
-| 左盒完整抓放入口 | `tests/test_old_grab_left_sequence.py` | 到墙抓取、后撤并按 Servo0=0 放入左盒 | 人工单次运行；待实机验证，不接入比赛状态机 |
-| 右盒完整抓放入口 | `tests/test_old_grab_right_sequence.py` | 到墙抓取、后撤并按 Servo0=180 放入右盒 | 人工单次运行；待实机验证，不接入比赛状态机 |
+| 左盒完整抓放入口 | `tests/test_old_grab_left_sequence.py` | 到墙抓取、放入左盒并进入95/135/90/95/90静止姿态 | 人工单次运行；待实机验证，不接入比赛状态机 |
+| 右盒完整抓放入口 | `tests/test_old_grab_right_sequence.py` | 到墙抓取、放入右盒并进入95/135/90/95/90静止姿态 | 人工单次运行；待实机验证，不接入比赛状态机 |
 
 ## 3. 当前实际运行链路
 
@@ -98,7 +98,7 @@ TaskController.reset_arm()
 
 对外部 STM32 工程的只读动作考古没有改变这一边界。`Core/Src/main.c` 的未调用 `Test_All()` 中有一个 `#if 0` 旧候选：Servo1/2/4 先到 0/0/135，底盘执行两段 `Move_Distance`，Stepper 以 800 pps 执行 +3000，Servo4 到 105、Servo2 到 15，再执行 -3000；底盘随后后退，Servo2 到 0、Servo1 以 10 ms/degree Sweep 到 93，最后 Stepper +5000、Servo4 到 135、Stepper -5000，各主要动作间保持原 500 ms 延时。它没有橙色或中间盒标注，也不在正式运行链中，并且包含不可忽略的底盘动作。
 
-该候选与当前 `ArmSequence.group1()` 的 Servo2、Servo1 和第二段 Stepper 参数明显不同，不能视为同一版本。操作者后续确认了其中机械臂动作可以工作，因此 `competition/grab_task.py` 将全部24个非底盘动作独立封装；`competition/grab_mission.py` 在右转重捕后先以 `LINE_STOP` 固定车辆，执行旧步骤1–5的 Servo1/2/4=0/0/135 前伸准备，再以 `LINE_START` 重新巡线0.38 m到墙，并在相应边界插入0.05 m和0.30 m后退。这样机械臂不会到墙后才展开，准备耗时也不会计入0.38 m巡线时间。由于STM32烧录版本、Stepper起始高度和后退速度仍未现场关联，这条固定路线仍须分阶段实测，且暂不接入 `CompetitionRunner -> TaskController -> ArmSequence`。
+该候选与当前 `ArmSequence.group1()` 的 Servo2、Servo1 和第二段 Stepper 参数明显不同，不能视为同一版本。`competition/grab_task.py`保留全部24个非底盘旧动作，并在末尾追加抓取专用静止姿态Servo0..4=95/135/90/95/90；`competition/grab_mission.py`在右转重捕后前伸机械臂，再巡线0.38 m到墙并插入0.05 m和0.30 m后退，放置后执行同一静止姿态。`ArmSequence.safe_home()`保持原样，因为其Servo4=135并不等于本次抓取结束静止角Servo4=90。该固定路线仍须分阶段实测，且暂不接入`CompetitionRunner -> TaskController -> ArmSequence`。
 
 ### 3.2 competition 视觉接近组件
 
@@ -368,6 +368,7 @@ tests/test_old_grab_left_sequence.py
   -> 旧步骤1-18：前伸 -> 前进0.50m -> 后退0.05m -> 抓取 -> 后退0.30m
   -> Servo2=180 -> Servo0=0 -> Servo1 Sweep_To(170,10)
   -> Stepper +5000 -> Servo4=135 -> Stepper -5000
+  -> Servo0..4=95/135/90/95/90 -> 等待500ms
   -> STOP / 关闭串口
 
 tests/test_old_grab_right_sequence.py
@@ -376,12 +377,13 @@ tests/test_old_grab_right_sequence.py
   -> 旧步骤1-18：前伸 -> 前进0.50m -> 后退0.05m -> 抓取 -> 后退0.30m
   -> Servo2=180 -> Servo0=180 -> Servo1 Sweep_To(170,10)
   -> Stepper +5000 -> Servo4=135 -> Stepper -5000
+  -> Servo0..4=95/135/90/95/90 -> 等待500ms
   -> STOP / 关闭串口
 ```
 
 `robot_startup.py` 复用 `hardware.stm32_link.Stm32Link`，不自行创建串口协议实现。它只用于人工启动前机械臂预升高，不是真正 Homing：升降轴没有限位开关或编码器，脚本无法判断绝对高度，重复运行会继续向上移动。连接、HELLO、Stepper、ERR 或 Ctrl+C 异常均退出，并在连接仍有效时执行 best-effort STOP。该入口不会被 `CompetitionRunner`、`MissionController` 或任何自动比赛流程调用。
 
-左右盒脚本通过 `Stm32Link` 向 `ArmSequence` 提供唯一串口连接。两者直接复用 `test_old_grab_sequence.py` 的旧步骤1–18和开环底盘距离实现，先完成到墙、后撤、抓取、收回及第二次后撤，再执行目标盒放置；左/右放置仅在Servo0的0/180角度上不同。Stepper沿用800 pps，并分别等待ACK和MOVE_DONE；任意ERR、通信异常或Ctrl+C都进入best-effort STOP和串口释放。两个脚本均未被competition状态机或其他自动入口导入。
+左右盒脚本通过`Stm32Link`向`ArmSequence`提供唯一串口连接。两者复用旧步骤1–18和底盘距离实现，完成到墙、抓取、收回、后撤及目标盒放置后，均依次发送Servo0..4=95/135/90/95/90并等待500 ms，再执行最终STOP。中盒原测试和competition抓取模块使用同一组末端角度。`ArmSequence`既有搭建动作及`safe_home()`未修改。
 
 这些入口用于机械臂回归和分组调试，不应和整车主控同时运行。
 

@@ -37,6 +37,14 @@ STEPPER_PLACE_STEPS = 5000
 STEPPER_PPS = 800
 SERVO_4_RELEASE_ANGLE = 135
 ACTION_DELAY_S = 0.5
+REST_SETTLE_S = 0.5
+GRAB_REST_SERVO_ANGLES: tuple[tuple[int, int], ...] = (
+    (0, 95),
+    (1, 135),
+    (2, 90),
+    (3, 95),
+    (4, 90),
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -150,6 +158,22 @@ def execute_right_placement(
     )
 
 
+def execute_grab_rest_pose(
+    stm32: Stm32Link,
+    arm: ArmSequence,
+) -> None:
+    """Move every Servo to the configured post-grab resting angle."""
+    print("\nRETURN ARM TO REST: Servo0..4 = 95,135,90,95,90")
+    for index, angle in GRAB_REST_SERVO_ANGLES:
+        arm.servo_set(index, angle)
+    old_grab._guarded_delay(
+        stm32,
+        REST_SETTLE_S,
+        label="右盒抓取结束/静止姿态稳定等待",
+        output=print,
+    )
+
+
 def _try_stop(arm: ArmSequence | None) -> None:
     if arm is None:
         return
@@ -188,6 +212,7 @@ def main() -> int:
         arm.stop(require_ack=True)
         execute_grab_and_retreat(stm32, arm, args)
         execute_right_placement(stm32, arm)
+        execute_grab_rest_pose(stm32, arm)
         arm.stop(require_ack=True)
 
         print("\nRIGHT BOX COMPLETE TEST FINISHED")

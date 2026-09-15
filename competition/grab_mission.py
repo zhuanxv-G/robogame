@@ -25,7 +25,7 @@ Mission flow (one explicit state per phase)::
     BACKOFF         VEL backward 0.05 m -> STOP / ACK -> old 500 ms wait
     PICK            lower, close and lift
     RETREAT         VEL backward 0.30 m -> STOP / ACK -> old 500 ms wait
-    PLACE           place, release and retract
+    PLACE           place, release, retract and return all Servos to rest
     DONE            mission success
     ERROR           any exception: best-effort STOP, then re-raise
 
@@ -65,6 +65,7 @@ from competition.grab_task import (  # noqa: E402
     PREPARE_ARM_STEPS,
     PRE_PICK_SETTLE_STEPS,
     PRE_PLACE_SETTLE_STEPS,
+    REST_ARM_STEPS,
     execute_grab_steps,
 )
 
@@ -357,12 +358,18 @@ class GrabMissionController:
         self._set_phase(MissionPhase.PLACE)
 
     def _phase_place(self) -> None:
-        """Place, release and retract, then finish in a confirmed STOP."""
+        """Place, return the arm to rest, then finish in a confirmed STOP."""
         self._output("")
         self._output("Place object")
         execute_grab_steps(
             self._stm32,
             PLACE_ARM_STEPS,
+            output=self._output,
+            clock=self._clock,
+        )
+        execute_grab_steps(
+            self._stm32,
+            REST_ARM_STEPS,
             output=self._output,
             clock=self._clock,
         )
@@ -373,7 +380,7 @@ class GrabMissionController:
             debug_label="grab_mission_end",
         )
         self._output(f"RX: {stop_ack}")
-        self._output("Grab and placement complete")
+        self._output("Grab, placement and rest pose complete")
         self._output("")
         self._output("=== MISSION SUCCESS ===")
         self._set_phase(MissionPhase.DONE)
@@ -523,7 +530,7 @@ def _print_plan(output: Callable[[str], object]) -> None:
         "JUNCTION_DETECTED -> TURN -> LINE_REACQUIRED -> LINE_STOP -> "
         "prepare arm -> LINE_START -> timed line follow 0.38m to wall -> "
         "LINE_STOP -> backoff 0.05m -> "
-        "pick -> retreat 0.30m -> place -> STOP"
+        "pick -> retreat 0.30m -> place -> rest pose -> STOP"
     )
 
 
