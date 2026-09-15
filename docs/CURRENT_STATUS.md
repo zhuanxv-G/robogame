@@ -48,6 +48,8 @@ robogame/
 │   └── mission.py                 # 比赛任务枚举、顺序和任务元数据
 ├── tests/                         # 人工执行的相机/串口/运动诊断脚本
 │   ├── test_old_grab_sequence.py # 旧抓放候选动作独立测试入口
+│   ├── test_old_grab_left_sequence.py  # 已抓取物块的左盒放置测试入口
+│   ├── test_old_grab_right_sequence.py # 已抓取物块的右盒放置测试入口
 │   └── test_line_to_wall.py      # 巡线、右转、重捕后定时到墙入口
 ├── legacy/                        # 旧主控、旧协议和早期原型
 ├── docs/                          # 环境、场地、协议、架构和状态文档
@@ -120,6 +122,7 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 | STM32 底盘、电机、巡线 | 直线可用，左右 T 待烧录实测 | 普通巡线 PID、0.80 m/s 速度和传感器读取未改；路口门控使用 1500 ms 启动保护、`0110` 连续 20 次 arming、`1110/0111/1111` 连续 8 次确认和 3000 ms cooldown。`1110` 锁存 LEFT、`0111` 锁存 RIGHT，左右均按 11.5 s 转向并同向搜索重捕 |
 | Servo、Stepper、机械臂 | 动作层已验证 | `ArmSequence` 可复用，三组搭建动作和安全 HOME 已保留；不要改动参数 |
 | 旧抓放候选测试 | 机械臂部分已实机验证，底盘段待实机 | `test_old_grab_sequence.py` 按旧 `main.c:214-248` 的 27 步顺序执行 Servo/Stepper 和三段底盘距离动作；其机械臂部分已在实机验证动作正常（2026-09-14 确认），底盘三段仍是 VEL 开环时间估算，保持原样不作正式封装 |
+| 左右盒放置测试 | 代码完成，待实机 | `test_old_grab_left_sequence.py` 和 `test_old_grab_right_sequence.py` 在物块已经抓稳并抬起的前提下，分别按 Servo0=0/180 执行左/右盒放置；仅为人工单次测试，不接入比赛状态机 |
 | K230D 物块视觉 | 单项检测已验证 | 当前主控能解析目标并完成对准/接近；完整橙色、紫色任务切换尚未接入 |
 | K230D 接口层 | 骨架完成，未实机回归 | `K230Link` 封装连接生命周期、现有 `TARGET` / `NO_TARGET` 解析格式和最新消息读取 |
 | K230D 对准到搭建 | 第一版已接通 | `main_controller_align.py` 可从 ALIGN/APPROACH 到 READY，再经人工 `b` 确认执行 ARM_BUILD |
@@ -318,7 +321,20 @@ python3 tests/test_old_grab_sequence.py \
 
 脚本保留旧 `main.c:214-248` 的全部 27 个源码步骤及原延时。UART 语法不变，STM32 只把 `VEL.Y` 合法范围从 ±0.30 放宽到 ±0.80；三段 `Move_Distance` 仍由 Pi 每 100 ms 刷新 `VEL` 并按时间估算。脚本默认发送 ±0.80 命令值，计时则使用独立的前进/后退实测速度参数；以目前唯一可用的巡线实测基线 0.118 m/s 计算，+0.50 m、-0.05 m、-0.30 m 分别持续约 4.24 s、0.42 s、2.54 s，每段结束发送 STOP 并等待 ACK。后退暂沿用前进基线，必须单独实测后更新；该实现不是旧版编码器闭环，实际行程仍会受加减速、打滑、负载和通信延迟影响。旧固件未烧录新上限时会返回 `ERR,VEL`，脚本随后立即 STOP。该入口不表示完整抓放候选或颜色/箱位语义已经验证，也没有修改或复用 `ArmSequence` 的既有搭建动作。
 
-#### 6.3.3 正式抓取任务模块入口
+#### 6.3.3 左右盒机械臂放置测试入口
+
+```bash
+cd ~/robogame
+source venv/bin/activate
+python3 tests/test_old_grab_left_sequence.py
+python3 tests/test_old_grab_right_sequence.py
+```
+
+两个脚本只验证“物块已经抓稳并抬起”之后的放盒动作，不执行底盘移动，也不重复下降抓取；运行前必须确认夹爪中物块状态和升降轴剩余行程。连接 STM32 后先执行 `HELLO_STM32,1`，收到 `STM32_OK,1` 后停在 `Press ENTER to start`，只有单独按 ENTER 才继续。
+
+左盒严格执行 `Servo2=180 -> Servo0=0 -> Servo1 Sweep_To(170,10) -> Stepper +5000@800 -> Servo4=135 -> Stepper -5000@800`；右盒仅把 Servo0 改为 180，其余角度、步数、速度和顺序相同。实现复用 `Stm32Link` 和 `ArmSequence` 的现有 HELLO、Servo 与 Stepper 方法；Stepper 必须等到 ACK 和 `STEPPER_MOVE_DONE` 才进入下一步，任意 `ERR`、通信异常或 Ctrl+C 都尝试 STOP，最终关闭串口。两个入口没有修改 `arm_sequence.py`、STM32 协议或 competition 状态机。
+
+#### 6.3.4 正式抓取任务模块入口
 
 ```bash
 python3 -m competition.grab_task --dry-run
@@ -546,7 +562,7 @@ LINE_START
 
 `tests/` 主要是一组人工硬件诊断脚本。多数旧脚本在导入或启动时立即打开串口，其中 `motor_cmd_test.py` 会直接让底盘运动；不能批量运行，也不能在主控制器占用同一串口时运行。
 
-AprilTag 两个旧脚本同样是相机人工测试，不包含断言。`test_line_to_tag.py`、`test_navigation_topology_live.py`、`test_junction_turn.py` 和 `test_multi_junction_route.py` 都是带人工启动确认且会驱动底盘的实机入口，不能由自动测试调用。`test_old_grab_sequence.py` 只有在严格输入 `START` 后才驱动底盘、Servo 和 Stepper，并在启动、每段定时距离结束、Ctrl+C、ERR、异常和正常完成路径请求 STOP；它也不能由自动测试调用。`test_line_sensor_capture.py` 只允许 `LINE_STATUS`，不会驱动任何执行器，但会打开真实 STM32 串口，仍需人工单独运行。
+AprilTag 两个旧脚本同样是相机人工测试，不包含断言。`test_line_to_tag.py`、`test_navigation_topology_live.py`、`test_junction_turn.py` 和 `test_multi_junction_route.py` 都是带人工启动确认且会驱动底盘的实机入口，不能由自动测试调用。`test_old_grab_sequence.py` 只有在严格输入 `START` 后才驱动底盘、Servo 和 Stepper，并在启动、每段定时距离结束、Ctrl+C、ERR、异常和正常完成路径请求 STOP；它也不能由自动测试调用。新增的左右盒脚本在 HELLO 后等待 ENTER，只驱动 Servo 和 Stepper，但同样必须作为人工实机入口单独运行，不能由自动测试调用。`test_line_sensor_capture.py` 只允许 `LINE_STATUS`，不会驱动任何执行器，但会打开真实 STM32 串口，仍需人工单独运行。
 
 `test_route_executor_unit.py` 使用四类 Fake 覆盖两/三动作严格推进、方向不匹配、重复事件、Pi watchdog、全部路口完成但未到站、最终 ARRIVED 后拓扑更新、NavigationController FAULT、AprilTag 异常、STM32 协议错误、空 route 和零路口路线。`test_multi_junction_route_unit.py` 确认未输入严格 `START` 时 STM32/Camera factory 均不会调用。`test_navigation_controller_unit.py` 新增确认最后路口交接不会重复发送 `LINE_START`。`test_line_to_wall_unit.py` 使用 Fake STM32/时钟覆盖距离公式、无需硬件的 dry-run、严格 START、单次 RIGHT 路口流程、计时期间保持 LINE_FOLLOW、错误方向、ERR 和 Ctrl+C STOP。`test_grab_task_unit.py` 逐项核对 24 个非底盘动作，覆盖 Servo/Stepper ACK/DONE 日志、启动/结束 STOP、异步 ERR STOP 和未连接保护。`test_grab_mission_unit.py` 覆盖完整成功流程，明确断言不存在正向 VEL 第二段，并验证准备、5 cm 后退、抓取、30 cm 后退和放置的顺序；所有单元测试都不连接硬件。
 
