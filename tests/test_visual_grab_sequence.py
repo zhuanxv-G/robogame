@@ -2,12 +2,17 @@
 
 The robot must be placed at the grab area facing the wall.  The script first
 replays the verified fixed-position flow of ``tests/test_old_grab_sequence.py``
-(arm preparation, wall approach, backoff), then hands chassis positioning to
-the K230D:
+(wall approach, backoff), then hands chassis positioning to the K230D:
 
-    PREPARE_ARM -> 撞墙 0.50 m -> 后撤 0.05 m 到视觉抓取位置
+    Servo0=0 机械臂转离摄像头视野 -> 撞墙 0.50 m -> 后撤 0.05 m 到视觉抓取位置
     -> SEARCH -> ALIGN -> READY (STOP ACK)
-    -> PICK -> 后撤 0.30 m -> PLACE -> 静止姿态
+    -> 恢复 Servo0=95 -> PREPARE_ARM -> PICK -> 后撤 0.30 m -> PLACE -> 静止姿态
+
+During the wall approach and the visual phase the arm base (Servo0) is held
+at 0 deg so the arm stays out of the K230D field of view: the old PREPARE
+pose fills the whole image.  Once READY is confirmed, Servo0 returns to the
+verified grab baseline (95 deg) and the previously used arm process
+(PREPARE_ARM -> PICK -> PLACE) runs unchanged.
 
 This experiment only checks whether K230D visual positioning can replace the
 fixed grab position.  It does NOT touch the competition state machine,
@@ -39,6 +44,7 @@ from hardware.stm32_link import (  # noqa: E402
 )
 from vision.k230_link import K230Link  # noqa: E402
 from competition.grab_task import (  # noqa: E402
+    GRAB_REST_SERVO_ANGLES,
     PICK_ARM_STEPS,
     PLACE_ARM_STEPS,
     PREPARE_ARM_STEPS,
@@ -56,6 +62,9 @@ from competition.grab_task import (  # noqa: E402
 WALL_APPROACH_DISTANCE = 0.50      # 旧步骤6：前进撞墙定位
 VISUAL_BACKOFF_DISTANCE = 0.05     # 旧步骤7：后撤到视觉抓取位置
 POST_PICK_RETREAT_DISTANCE = 0.30  # 旧步骤17：抓起后后撤
+
+VISUAL_SERVO0_ANGLE = 0  # 视觉阶段：机械臂底座转离 K230D 视野
+GRAB_SERVO0_ANGLE = GRAB_REST_SERVO_ANGLES[0]  # 抓取前恢复已验证抓取基线(95)
 
 
 # ============================================================
@@ -438,13 +447,21 @@ def _print_plan(
     )
     output(f"search_timeout={args.search_timeout:.1f} s")
     output(
+        f"visual_servo0_angle={VISUAL_SERVO0_ANGLE} deg "
+        "（视觉阶段机械臂转离视野）"
+    )
+    output(
+        f"grab_servo0_angle={GRAB_SERVO0_ANGLE} deg "
+        "（抓取前恢复已验证基线）"
+    )
+    output(
         f"post_pick_retreat={POST_PICK_RETREAT_DISTANCE:.2f} m "
         f"({retreat_time:.2f} s)"
     )
     output(
-        "流程: PREPARE_ARM -> 撞墙 -> 后撤到视觉位置 -> "
-        "SEARCH -> ALIGN -> READY(STOP) -> PICK -> 后撤0.30m -> "
-        "PLACE -> 静止姿态 -> STOP"
+        "流程: Servo0=0转离视野 -> 撞墙 -> 后撤到视觉位置 -> "
+        "SEARCH -> ALIGN -> READY(STOP) -> Servo0=95恢复基线 -> "
+        "PREPARE_ARM -> PICK -> 后撤0.30m -> PLACE -> 静止姿态 -> STOP"
     )
 
 
@@ -498,15 +515,15 @@ def run_test(
         )
         output(f"RX: {stop_ack}")
 
-        # --- 固定位置阶段（复用已验证旧序列的机械臂准备与底盘距离）---
+        # --- 视觉阶段前：Servo0 归 0，机械臂转离 K230D 视野 ---
+        # 旧序列在撞墙前就前伸机械臂，该姿态会填满摄像头画面，因此
+        # 撞墙与视觉阶段把底座转到 0 度，抓取开始前再恢复已验证姿态。
         output("")
-        output("=== PREPARE ARM (旧步骤1-5) ===")
-        execute_grab_steps(
-            stm32,
-            PREPARE_ARM_STEPS,
-            output=output,
-            clock=clock,
+        output(
+            f"=== Servo0 -> {VISUAL_SERVO0_ANGLE} 度（机械臂转离视野） ==="
         )
+        ack = stm32.servo_set(0, VISUAL_SERVO0_ANGLE, timeout=ACK_TIMEOUT_S)
+        output(f"RX: {ack}")
 
         output("")
         output(f"=== 撞墙定位 ({WALL_APPROACH_DISTANCE:.2f} m) ===")
@@ -555,6 +572,24 @@ def run_test(
         )
 
         # --- 抓取与放盒（复用已验证机械臂动作，不重新实现）---
+        # 抓取开始前恢复 Servo0 到已验证抓取基线，再执行此前一直使用
+        # 的机械臂准备与抓取过程（PREPARE_ARM -> PICK）。
+        output("")
+        output(
+            f"=== 恢复 Servo0 -> {GRAB_SERVO0_ANGLE} 度（抓取基线） ==="
+        )
+        ack = stm32.servo_set(0, GRAB_SERVO0_ANGLE, timeout=ACK_TIMEOUT_S)
+        output(f"RX: {ack}")
+
+        output("")
+        output("=== PREPARE ARM (旧步骤1-5) ===")
+        execute_grab_steps(
+            stm32,
+            PREPARE_ARM_STEPS,
+            output=output,
+            clock=clock,
+        )
+
         output("")
         output("=== GRAB: 执行已验证抓取动作 ===")
         execute_grab_steps(

@@ -527,18 +527,20 @@ python3 tests/test_visual_grab_sequence.py
 
 ```text
 STOP / ACK
-  -> PREPARE_ARM（旧步骤1-5机械臂前伸准备）
+  -> Servo0 -> 0：机械臂底座转离 K230D 视野（旧 PREPARE 前伸姿态会遮挡摄像头）
   -> 撞墙：VEL 前进约 4.24 s（0.50 m）-> STOP / ACK
   -> 后撤到视觉抓取位置：VEL 后退约 0.42 s（0.05 m）-> STOP / ACK -> 等待 500 ms
   -> SEARCH：NO_TARGET 时以 VEL,x=-0.10 缓慢向左横移扩大搜索范围
   -> ALIGN：TARGET 时按 error_x 以 VEL,x=±0.10 左右横移，目标 abs(error_x)<30
   -> READY：abs(error_x)<30 且 pixels>0 连续 5 帧 -> STOP / ACK
+  -> Servo0 -> 95：恢复已验证抓取基线
+  -> PREPARE_ARM（旧步骤1-5机械臂前伸准备）
   -> PICK：下降、夹取、抬升
   -> VEL 后退约 2.54 s（0.30 m）-> STOP / ACK -> 等待 500 ms
   -> PLACE：放入中间盒并执行 Servo0..4=95/135/90/95/90 静止姿态 -> STOP / ACK
 ```
 
-SEARCH 超过 `--search-timeout`（默认 10 s）或 K230D 超过 0.60 s 无有效数据会 STOP 并进入故障清理；K230D 断开、STM32 `ERR`、协议超时和 Ctrl+C 均先尝试全局 STOP，再释放 STM32 与 K230D 连接。机械臂阶段停止读取 K230D，由已验证抓取动作独占 STM32 回复。该入口只验证单次橙色抓取，不实现连续抓取、紫色方块、AprilTag 或 CompetitionRunner 接入。
+SEARCH 超过 `--search-timeout`（默认 10 s）或 K230D 超过 0.60 s 无有效数据会 STOP 并进入故障清理；K230D 断开、STM32 `ERR`、协议超时和 Ctrl+C 均先尝试全局 STOP，再释放 STM32 与 K230D 连接。机械臂阶段停止读取 K230D，由已验证抓取动作独占 STM32 回复。Servo0 在撞墙与视觉阶段保持 0° 使机械臂避开 K230D 视野，READY 停车后恢复 95° 基线再执行旧步骤1-5准备与抓取；PREPARE 改在距墙 0.05 m 处执行，前伸空间需实车确认。该入口只验证单次橙色抓取，不实现连续抓取、紫色方块、AprilTag 或 CompetitionRunner 接入。
 
 ### 6.5 STM32 入口
 
