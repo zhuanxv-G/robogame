@@ -1,6 +1,6 @@
 # RoboGame 软件架构
 
-> 架构快照：2026-09-12。本文描述仓库当前实际状态，同时把尚未接入的规划模块明确标出。
+> 架构快照：2026-09-18。本文描述仓库当前实际状态，同时把尚未接入的规划模块明确标出。
 
 ## 1. 系统边界
 
@@ -54,6 +54,7 @@ Logitech C270 ──USB Video───┼──> Raspberry Pi 5
 | 巡线传感器采样 | `tests/test_line_sensor_capture.py` | 只读轮询 LINE_STATUS、人工标记并保存 CSV | 工具与 Fake 测试完成；真实 CSV 已作为路口第一版输入 |
 | 路口协议/人工入口 | `hardware/stm32_link.py`、`tests/test_junction_turn.py` | 直接选动作或规划路线后预设首个 NEXT_TURN，严格 START 后单项实机测试 | 协议和 Fake 测试完成；TURN_DONE 后 STOP，未接入 Runner，未实车验证 |
 | 比赛入口 | `competition/main.py` | 初始化上述接口并打印状态 | 安全骨架完成；不连接硬件 |
+| 固定路线比赛入口 | `competition/full_mission.py` | 用唯一 Stm32Link 串联三个 T 路口、现有抓取流程、固定回线转向和搭建区停车 | 代码与 Fake 测试完成；不使用视觉、不执行搭建动作，待整车实测 |
 | 局部主控 | `main_controller_align.py` | K230D 对准、接近、停车、人工触发搭建 | 第一版联调完成 |
 | 机械动作 | `arm_sequence.py` | 已验证的三组搭建动作 | 已接入局部主控 |
 | 独立入口 | `build_sequence.py` | 单独回归机械臂完整动作 | 已实机使用 |
@@ -99,7 +100,35 @@ TaskController.reset_arm()
 
 对外部 STM32 工程的只读动作考古没有改变这一边界。`Core/Src/main.c` 的未调用 `Test_All()` 中有一个 `#if 0` 旧候选：Servo1/2/4 先到 0/0/135，底盘执行两段 `Move_Distance`，Stepper 以 800 pps 执行 +3000，Servo4 到 105、Servo2 到 15，再执行 -3000；底盘随后后退，Servo2 到 0、Servo1 以 10 ms/degree Sweep 到 93，最后 Stepper +5000、Servo4 到 135、Stepper -5000，各主要动作间保持原 500 ms 延时。它没有橙色或中间盒标注，也不在正式运行链中，并且包含不可忽略的底盘动作。
 
-该候选与当前 `ArmSequence.group1()` 的 Servo2、Servo1 和第二段 Stepper 参数明显不同，不能视为同一版本。`competition/grab_task.py`保留全部24个非底盘旧动作，并在末尾追加抓取专用静止姿态Servo0..4=95/135/90/95/90；`competition/grab_mission.py`在右转重捕后前伸机械臂，再巡线0.38 m到墙并插入0.05 m和0.30 m后退，放置后执行同一静止姿态。`ArmSequence.safe_home()`保持原样，因为其Servo4=135并不等于本次抓取结束静止角Servo4=90。该固定路线仍须分阶段实测，且暂不接入`CompetitionRunner -> TaskController -> ArmSequence`。
+该候选与当前 `ArmSequence.group1()` 的 Servo2、Servo1 和第二段 Stepper 参数明显不同，不能视为同一版本。`competition/grab_task.py`保留全部24个非底盘旧动作，并在末尾追加抓取专用静止姿态Servo0..4=95/135/90/95/90；`competition/grab_mission.py`在右转重捕后前伸机械臂，再巡线0.38 m到墙并插入0.05 m和0.30 m后退，放置后执行同一静止姿态。`ArmSequence.safe_home()`保持原样，因为其Servo4=135并不等于本次抓取结束静止角Servo4=90。`competition/full_mission.py` 直接复用这些动作分段和距离/时序常量，不复制 Servo 或 Stepper 参数；两个固定路线入口都仍须分阶段实测，且暂不接入`CompetitionRunner -> TaskController -> ArmSequence`。
+
+### 3.1.1 完整固定路线比赛入口
+
+`competition/full_mission.py` 是与通用 `CompetitionRunner` 分离的第一版 live 固定路线编排器。它只创建或接收一个 `Stm32Link`，不构造 K230D 或 AprilTag 资源；模块导入和 `--dry-run` 均无硬件副作用，live 模式必须通过严格 `START` 门禁。
+
+```text
+FullMission
+  START
+    -> STOP / ACK
+    -> NEXT_TURN,RIGHT / ACK -> LINE_START / ACK
+  LINE_TO_GRAB
+    -> first JUNCTION_DETECTED -> TURN_STARTED/LINE_REACQUIRED/TURN_DONE RIGHT
+    -> NEXT_TURN,LEFT / ACK -> second JUNCTION_DETECTED
+  TURN_TO_GRAB
+    -> TURN_STARTED/LINE_REACQUIRED/TURN_DONE LEFT
+  GRAB
+    -> LINE_STOP
+    -> grab_task 既有 PREPARE/PICK/PLACE/REST 动作分段
+    -> grab_mission 既有 0.38 m 到墙、0.05 m + 0.30 m 后退时序
+  RETURN_TO_LINE
+    -> VEL omega=-0.80，固定刷新 11.5 s -> STOP / ACK
+    -> NEXT_TURN,RIGHT / ACK -> LINE_START / ACK
+  LINE_TO_BUILD / TURN_TO_BUILD
+    -> third JUNCTION_DETECTED -> RIGHT -> LINE_REACQUIRED/TURN_DONE
+    -> STOP / ACK -> BUILD_ZONE_REACHED -> FINISHED
+```
+
+每个路口都严格要求 `JUNCTION_DETECTED` 后才接受方向一致的 `TURN_STARTED`，并同时等到同方向 `TURN_DONE` 与 `LINE_REACQUIRED`；乱序、重复、错误方向、`ERR,...` 或 watchdog 超时都进入 `FAULT`。`TURN_BACK_TO_LINE_TIME=11.5` 与 `TURN_BACK_TO_LINE_OMEGA=-0.80` 仅集中保存当前右转初值，尚未完成抓取后返回位置的实车标定。到达第三个路口分支后立即确认 STOP 并打印 `BUILD_ZONE_REACHED`，本版本不调用任何搭建动作。
 
 ### 3.2 competition 视觉接近组件
 
@@ -431,6 +460,7 @@ tests/test_old_grab_right_sequence.py
 | 拓扑导航状态 | current_location、current_tag、target_location | 只表示已确认地标和规划目标，不表示底盘已经执行路线 |
 | 路线执行状态 | IDLE、PLANNING、READY、WAITING_JUNCTION、TURNING、WAITING_TURN_DONE、ROUTE_TURNS_DONE、FINAL_TAG_APPROACH、ARRIVED、FINISHED、FAULT | 逐路口动作和最终 Tag 到站；当前动作下标可观察 |
 | CompetitionRunner 阶段 | START、FOLLOW_LINE、GET_ORANGE、VISUAL_APPROACH、GRAB_ORANGE、BUILD、FINISH、FAULT | 第一版比赛动作编排；完成事件当前只能外部注入 |
+| 固定路线 FullMission 状态 | START、LINE_TO_GRAB、TURN_TO_GRAB、GRAB、RETURN_TO_LINE、LINE_TO_BUILD、TURN_TO_BUILD、FINISHED、FAULT | 不使用视觉的独立 live 流程；通过三个真实路口事件和既有抓取动作闭环，待整车实测 |
 | 旧比赛任务元数据 | `strategy/mission.py` 中 START、FOLLOW_LINE、GET_ORANGE、GET_PURPLE、BUILD | 已有任务计划数据，尚未迁移 |
 | 新比赛任务状态 | `competition/mission_state.py` 中 START、FOLLOW_LINE、GET_ORANGE、GET_PURPLE、BUILD、FINISH、FAULT | 未来比赛入口使用的顶层状态 |
 
@@ -588,6 +618,7 @@ test_multi_junction_route.py
 - Tag 辅助到站只在指定 Tag 面积连续达标后停车；单帧或少量漏检只清零确认计数，不会突然 STOP。
 - 到站 STOP 必须收到 ACK 才进入 `ARRIVED`；AprilTagService/Stm32Link 异常会尝试 STOP 并进入 `FAULT`，STOP 失败保持 `FAULT`。
 - Tag 5 早前偶发出现车辆已停止但首次 STOP ACK 等待超时；加入 STOPDBG 后的后续实测未再复现。当前继续保持 2.0 s timeout 和原 STOP 协议，根因尚未确认。
+- `FullMission` 在启动、每个定时 VEL 结束、抓取结束和搭建区终点都要求 STOP ACK；任意异常或 Ctrl+C 进入 `FAULT` 并 best-effort STOP，入口 `finally` 关闭其唯一 STM32 连接。固定路线尚未整车实测，不能把 Fake 结果视为现场安全结论。
 
 仍存在的架构风险：
 
@@ -650,6 +681,7 @@ tests/test_line_sensor_capture.py 只读 LINE_STATUS、人工标记和 CSV 现�
 tests/test_line_sensor_capture_unit.py LINE_STATUS 解析、失败状态、唯一命令、CSV/标记纯软件测试
 tests/test_junction_turn.py   直接动作或start/target路线模式；严格START后只执行一个真实路口动作
 tests/test_junction_turn_unit.py NEXT_TURN/事件解析、路线首动作、START门禁和单路口STOP的FakeSerial纯软件测试
+tests/test_full_mission_unit.py RIGHT/LEFT/RIGHT、抓取分段、固定回线转向、STOP/门禁/关闭的Fake纯软件测试
 tests/vel_test.py            会驱动底盘
 tests/motor_cmd_test.py      启动后会依次驱动底盘
 tests/line_test.py           任意文本命令透传并原样显示回复；可安全发送 LINE_STATUS，也可发送会驱动底盘的命令
@@ -691,6 +723,6 @@ tests/test_visual_grab_sequence.py 人工确认后撞墙、K230D视觉定位、�
 STM32 唯一串口链路
 ```
 
-仍未完成的部分包括：实车标定并验证 T 字路口 LEFT/RIGHT/STRAIGHT 和 RouteExecutor 多路口链、处理普通巡线全白与近距离 Tag 移出画面的安全问题、把 RouteExecutor 接入 Runner、确认搭建区连线、设计比赛级 live 生命周期、实现 Tag 姿态修正、补入 GET_PURPLE、实机确认独立橙色/紫色取料动作，以及完整安全收尾和系统化测试。STOPDBG 继续保留供早前偶发 ACK timeout 再次出现时使用。
+仍未完成的部分包括：实车标定并验证 T 字路口 LEFT/RIGHT/STRAIGHT、固定路线抓取后 11.5 s 回线转向和 `FullMission` 整车链路，处理普通巡线全白与近距离 Tag 移出画面的安全问题，把 RouteExecutor 接入 Runner，确认搭建区精确停车，设计通用比赛级 live 生命周期，实现 Tag 姿态修正，补入 GET_PURPLE、随机物块策略和正式搭建动作，以及系统化实机回归。STOPDBG 继续保留供早前偶发 ACK timeout 再次出现时使用。
 
 实现顺序应继续优先保证协议和串口所有权，其次接入状态转换，最后再标定世界坐标和视觉阈值。不要在全自动状态机未可观测、未可安全停车前一次性叠加全部动作。

@@ -6,7 +6,7 @@
 
 当前机器人采用 Raspberry Pi 5、STM32F407ZGT6 和 K230D / CanMV 协同工作。Raspberry Pi 负责视觉结果处理、比赛状态和任务决策；STM32 负责底盘、巡线、Servo 和 Stepper 的实时执行；K230D 负责物块视觉检测，USB Camera 用于 AprilTag 检测。
 
-项目正在开发中。单项硬件能力、机械臂搭建动作和局部视觉联调已有验证记录，但完整比赛闭环尚未完成。本仓库只包含 Raspberry Pi 端代码，不包含 STM32 工程。
+项目正在开发中。单项硬件能力、机械臂搭建动作和局部视觉联调已有验证记录；第一版无视觉固定路线比赛流程已完成代码与 Fake 测试，但尚未整车实测，视觉完整比赛闭环仍未完成。本仓库只包含 Raspberry Pi 端代码，不包含 STM32 工程。
 
 ## 2. 系统总体架构
 
@@ -43,7 +43,7 @@ STM32 侧职责：
 - 执行 Stepper 指定步数运动。
 - 返回 ACK、完成通知和错误信息。
 
-新比赛架构要求一个进程只持有一个 STM32 串口连接。`competition/main.py` 已建立 `TaskController -> ArmSequence -> Stm32Link` 依赖，但目前不会连接硬件；现有联调入口仍保留原来的串口调用方式，尚未迁移。
+新比赛架构要求一个进程只持有一个 STM32 串口连接。`competition/main.py` 已建立 `TaskController -> ArmSequence -> Stm32Link` 依赖，但目前不会连接硬件；`competition/full_mission.py` 是独立的无视觉固定路线 live 入口，同样只使用一个 `Stm32Link`。现有其他联调入口仍保留原来的串口调用方式，尚未迁移。
 
 ## 3. 软件目录结构
 
@@ -51,6 +51,7 @@ STM32 侧职责：
 robogame/
 ├── competition/
 │   ├── main.py                    # 未来比赛入口，目前只初始化组件
+│   ├── full_mission.py            # 无视觉固定路线完整比赛入口
 │   ├── mission_state.py           # 比赛顶层状态
 │   ├── mission_controller.py      # 基础状态管理
 │   └── task_controller.py         # 机械臂任务适配
@@ -97,6 +98,7 @@ robogame/
 - AprilTag 检测器、服务接口和轻量定位接口已经建立。
 - 场地区域、Tag 和巡线拓扑世界模型已经建立，未知实测坐标保留为 TODO。
 - `MissionState`、`MissionController` 和安全的比赛入口骨架已经建立。
+- `competition/full_mission.py` 已串联三次 T 路口、现有抓取流程、固定回线右转和搭建区停车；纯软件测试完成，待整车实测。
 - `TaskController.build()` 和 `reset_arm()` 分别复用已验证的 `ArmSequence.run_all()` 与 `safe_home()`。
 - 机械臂三组搭建动作、Stepper 完成等待和安全 HOME 有实机验证记录。
 - `main_controller_align.py` 已完成 K230D 对准、接近、停车确认和人工触发搭建的第一版联调。
@@ -104,10 +106,10 @@ robogame/
 ### 尚未完成
 
 - `MissionController` 尚未实现比赛事件、合法状态转移和自动任务调度。
-- STM32 巡线与 Pi 任务层之间尚无确认的到站、路口或完成事件闭环。
+- STM32 路口事件已接入固定路线入口，但 RIGHT/LEFT 多路口链和抓取后回线仍待整车实测。
 - 独立橙色和紫色取料动作尚未实机确认；对应 TaskController 接口当前返回 `NotImplemented`。
 - K230D、AprilTag、巡线和 TaskController 尚未串成完整比赛流程。
-- BUILD、FINISH、FAULT 的统一 STOP、异常处理和资源关闭流程尚未接入比赛入口。
+- 通用 `competition/main.py` 尚未接入 live 的 BUILD、FINISH、FAULT 生命周期；固定路线入口已有 STOP/关闭路径，但本版不执行搭建动作。
 - 新 competition 架构尚未进行整车实机回归。
 
 ## 5. 开发流程
@@ -166,10 +168,13 @@ python3 competition/main.py
 ### 需要真实硬件的现有入口
 
 ```bash
+python3 -m competition.full_mission --dry-run
+python3 -m competition.full_mission
 python3 main_controller_align.py
 python3 build_sequence.py
 ```
 
+- `competition.full_mission --dry-run` 只打印 `RIGHT -> LEFT -> GRAB -> 固定 RIGHT -> RIGHT -> BUILD` 计划，不连接硬件；不带该参数且严格输入 `START` 后，会驱动底盘、Servo 和 Stepper，最后只打印 `BUILD_ZONE_REACHED`，不执行搭建动作。
 - `main_controller_align.py` 会打开 K230D 和 STM32 串口，并可能驱动底盘与机械臂。
 - `build_sequence.py` 会打开 STM32 串口，并执行固定预抬升和人工选择的机械臂动作。
 
