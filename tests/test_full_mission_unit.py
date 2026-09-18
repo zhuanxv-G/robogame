@@ -295,7 +295,7 @@ class FullMissionTests(unittest.TestCase):
         )
         self.assertEqual(TURN_TO_GRAB_TIME, 11.5)
         self.assertEqual(TURN_TO_GRAB_OMEGA, 0.80)
-        self.assertEqual(TURN_BACK_TO_LINE_TIME, 11.5)
+        self.assertEqual(TURN_BACK_TO_LINE_TIME, 12.78)
         self.assertEqual(TURN_BACK_TO_LINE_OMEGA, -0.80)
 
     def test_detected_second_junction_uses_existing_left_turn(self) -> None:

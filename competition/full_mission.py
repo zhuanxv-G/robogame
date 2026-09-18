@@ -60,10 +60,10 @@ from hardware.stm32_link import (  # noqa: E402
 )
 
 
-# Fixed return-to-line calibration.  These values deliberately reuse the
-# current STM32 RIGHT-turn baseline and remain a single adjustment point for
-# later field calibration.  They are not claimed as full-mission validation.
-TURN_BACK_TO_LINE_TIME = 11.5
+# Fixed return-to-line calibration.  The previous 90-degree baseline was
+# 11.5 s; 12.78 s is its proportional 100-degree value and remains a single
+# adjustment point for later field calibration.
+TURN_BACK_TO_LINE_TIME = 12.78
 TURN_BACK_TO_LINE_OMEGA = -0.80
 
 # The final junction uses a forced RIGHT turn.  These constants reproduce the
@@ -574,11 +574,12 @@ def _default_stm32_factory() -> Stm32Link:
 def _print_plan(output: Callable[[str], object]) -> None:
     output("RoboGame FULL FIXED ROUTE MISSION")
     output(
-        "route=line-nav RIGHT -> fixed 0.60 m -> LEFT -> GRAB "
-        "-> fixed RIGHT -> forced RIGHT -> BUILD"
+        "route=line-nav RIGHT (~95 deg) -> fixed 0.60 m -> LEFT -> GRAB "
+        "-> fixed RIGHT (~100 deg) -> forced RIGHT -> BUILD"
     )
     output(f"grab_line_approach={TARGET_DISTANCE:.2f} m")
     output("first_junction_mode=line_navigation_right")
+    output("first_line_nav_right_time=12.14 s (STM32 firmware)")
     output(f"final_junction_advance_time={FINAL_JUNCTION_ADVANCE_TIME:.2f} s")
     output(f"final_junction_advance_speed={FINAL_JUNCTION_ADVANCE_SPEED:.2f}")
     output(f"final_fixed_right_time={FINAL_TURN_TIME:.2f} s")

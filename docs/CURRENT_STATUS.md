@@ -10,7 +10,7 @@ RoboGame 是一套参加 RoboGame 2026 竞技组比赛的移动机器人系统�
 
 当前采用上下位机分工：Raspberry Pi 5 负责视觉结果处理、比赛状态和任务决策；STM32F407ZGT6 负责底盘、巡线、Servo 和 Stepper 的实时执行。K230D / CanMV 作为独立视觉协处理器，把目标检测结果发送给 Pi；Logitech C270 USB Camera 直接连接 Pi，用于 AprilTag 检测。
 
-项目已从单项硬件调试进入整车联调阶段。2026-09-18 新增 `competition/full_mission.py`，形成第一版不使用 K230D、AprilTag、视觉定位和随机物块策略的固定路线软件闭环。当前流程在首个路口预设 `NEXT_TURN,RIGHT`，并沿用 STM32 巡线状态机的路口前进、右转和重捕线事件；末端路口检测到 `JUNCTION_DETECTED` 后立即 `LINE_STOP`，由 Pi 复用现有 2.2 s 前进到中心基线，再按固定 `omega=-0.80、11.5 s` 强制 RIGHT。针对中间路口仅约 60 cm、LineNav 来不及重新稳定识别的问题，继续巡线 0.60 m 后固定 LEFT；若期间意外检测到该路口，则沿用现有 LEFT 事件流程以避免重复转弯。之后复用既有抓取及返回流程；全部新定时参数仍待整车标定。
+项目已从单项硬件调试进入整车联调阶段。2026-09-18 新增 `competition/full_mission.py`，形成第一版不使用 K230D、AprilTag、视觉定位和随机物块策略的固定路线软件闭环。当前流程在首个路口预设 `NEXT_TURN,RIGHT`，并沿用 STM32 巡线状态机的路口前进、右转和重捕线事件；RIGHT 定时由 90°/11.5 s 按比例调整为约 95°/12.14 s。末端路口检测到 `JUNCTION_DETECTED` 后立即 `LINE_STOP`，由 Pi 复用现有 2.2 s 前进到中心基线，再按固定 `omega=-0.80、11.5 s` 强制 RIGHT。针对中间路口仅约 60 cm、LineNav 来不及重新稳定识别的问题，继续巡线 0.60 m 后固定 LEFT；若期间意外检测到该路口，则沿用现有 LEFT 事件流程以避免重复转弯。抓取结束后的回线右转由 90°/11.5 s 按比例调整为约 100°/12.78 s；全部新定时参数仍待整车标定。
 
 ## 2. 当前目录结构
 
@@ -77,7 +77,7 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 | 幻尔四路巡线传感器 | 黑线检测 | STM32 软件 I2C：PC4=SCL、PC5=SDA，低 4 位 1=黑线 | 当前固件直线巡线已现场工作；全白输入会继续前进的风险待处理 |
 | 底盘电机及驱动 | 底盘执行 | 由 STM32 侧控制 | 电机和驱动器具体型号不在本仓库 |
 
-当前资料还缺少完整 BOM、供电树、接线图以及可追溯的 STM32 固件版本标识；巡线传感器型号、源码引脚和直线巡线能力已确认。T 路口状态机现已对称接受 `1110/0111/1111`，能够锁存左右方向并通过编译；2.2 s 前进、左右 11.5 s 转向和重捕线行为仍需烧录实测。
+当前资料还缺少完整 BOM、供电树、接线图以及可追溯的 STM32 固件版本标识；巡线传感器型号、源码引脚和直线巡线能力已确认。T 路口状态机现已对称接受 `1110/0111/1111`，能够锁存左右方向并通过编译；2.2 s 前进、LEFT 11.5 s、RIGHT 12.14 s 和重捕线行为仍需烧录实测。
 
 ## 4. 软件架构
 
@@ -122,7 +122,7 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 | Pi 车载环境与设备接入 | 已完成基础部署 | Python 3.13、虚拟环境和 USB 设备已建立；仓库没有依赖锁定文件 |
 | Pi ↔ STM32 串口通信 | 已验证 | 正式 by-id 路径和 115200 波特率已固定；请求/响应代码正在使用 |
 | STM32 通信抽象层 | 骨架完成，未实机回归 | `Stm32Link` 封装 HELLO_STM32、STOP、VEL、NEXT_TURN、路口事件、Servo/Stepper，并要求显式 `connect()` |
-| STM32 底盘、电机、巡线 | 直线可用，左右 T 待烧录实测 | 普通巡线 PID、0.80 m/s 速度和传感器读取未改；路口门控使用 1500 ms 启动保护、`0110` 连续 20 次 arming、`1110/0111/1111` 连续 8 次确认和 3000 ms cooldown。`1110` 锁存 LEFT、`0111` 锁存 RIGHT，左右均按 11.5 s 转向并同向搜索重捕 |
+| STM32 底盘、电机、巡线 | 直线可用，左右 T 待烧录实测 | 普通巡线 PID、0.80 m/s 速度和传感器读取未改；路口门控使用 1500 ms 启动保护、`0110` 连续 20 次 arming、`1110/0111/1111` 连续 8 次确认和 3000 ms cooldown。`1110` 锁存 LEFT并转11.5 s，`0111` 锁存 RIGHT并转12.14 s（约95°），随后同向搜索重捕 |
 | Servo、Stepper、机械臂 | 动作层已验证 | `ArmSequence` 可复用，三组搭建动作和安全 HOME 已保留；不要改动参数 |
 | 旧抓放候选测试 | 机械臂部分已实机验证，底盘段待实机 | `test_old_grab_sequence.py` 按旧 `main.c:214-248` 的 27 步顺序执行 Servo/Stepper 和三段底盘距离动作，完成后追加Servo0..4=95/135/90/95/90静止姿态；原机械臂部分已实机验证，新增静止收尾待实机 |
 | 左右盒完整抓放测试 | 代码完成，待实机 | `test_old_grab_left_sequence.py` 和 `test_old_grab_right_sequence.py` 复用旧步骤1–18，完整执行到墙、抓取和后撤，再分别放入左/右盒；两者完成后均追加Servo0..4=95/135/90/95/90静止姿态，不接入比赛状态机 |
@@ -144,7 +144,7 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 | 路口协议与人工入口 | 软件完成，待烧录/实车 | `test_junction_turn.py` 支持直接指定动作，或由 start/target 规划路线并只取首个动作；严格输入 `START` 后才连接，`TURN_DONE` 后 STOP，不会连续跑多个路口 |
 | 巡线到抓取墙测试 | Pi 入口完成，待烧录/实车 | `test_line_to_wall.py` 使用现有协议执行启动 STOP、预设 RIGHT、LINE_START、等待首个 `JUNCTION_DETECTED` 和 `LINE_REACQUIRED`，再保持 LINE_FOLLOW 约 3.22 s 后 LINE_STOP；STM32 已补上 `0111 -> RIGHT`，尚未烧录 |
 | 巡线到抓取完整任务 | Pi 入口完成，待实车 | `competition/grab_mission.py` 在右转重捕后先 LINE_STOP并前伸机械臂，再LINE_START巡线0.38 m到墙；随后后退0.05 m、抓取、后退0.30 m、放置并进入95/135/90/95/90静止姿态。全程STOP/ERR/Ctrl+C安全收尾，未实车 |
-| 固定路线完整比赛流程 | 代码与 Fake 测试完成，待整车实测 | 首个JUNCTION沿用巡线状态机RIGHT；中间巡线0.60 m后固定LEFT（若检测到第二路口则沿用事件LEFT）-> 抓取/后退约0.35 m -> 固定右转回线；末端JUNCTION后LINE_STOP -> 固定前进2.2 s到中心 -> 强制RIGHT -> BUILD_ZONE_REACHED |
+| 固定路线完整比赛流程 | 代码与 Fake 测试完成，待整车实测 | 首个JUNCTION沿用巡线状态机约95° RIGHT；中间巡线0.60 m后固定LEFT（若检测到第二路口则沿用事件LEFT）-> 抓取/后退约0.35 m -> 12.78 s约100°固定右转回线；末端JUNCTION后LINE_STOP -> 固定前进2.2 s到中心 -> 强制RIGHT -> BUILD_ZONE_REACHED |
 | K230D视觉辅助单次抓取实验 | 代码完成，待实车 | `tests/test_visual_grab_sequence.py` 复用已验证的机械臂准备、撞墙、后撤、抓取与放盒动作，抓取前插入 K230D SEARCH/ALIGN/READY 视觉定位；验证 K230D 能否替代固定抓取位置；不接入比赛状态机 |
 | competition 流程调度 | 第一版模拟流程完成 | `CompetitionRunner` 通过外部事件串联巡线、橙色目标接近、抓取、搭建和结束；默认 simulation mode 不调用硬件控制器 |
 | 机械臂任务控制 | 橙色抓取已封装，待接入控制器 | `TaskController.build()` 复用 `ArmSequence.run_all()`，`reset_arm()` 复用 `safe_home()`；新增 `competition/grab_task.py` 把已实机验证的旧版机械臂抓取动作封装为 `grab_orange()`，`TaskController.grab_orange()` 保持 NotImplemented，接线留待后续 |
@@ -556,13 +556,13 @@ python3 -m competition.full_mission
 
 ```text
 STOP / ACK -> NEXT_TURN,RIGHT -> LINE_START
-  -> 第一个 T：JUNCTION_DETECTED -> STM32 前进到中心并 RIGHT
+  -> 第一个 T：JUNCTION_DETECTED -> STM32 前进到中心并 RIGHT 12.14 s（约95°）
   -> TURN_STARTED,RIGHT -> LINE_REACQUIRED + TURN_DONE,RIGHT
   -> NEXT_TURN,LEFT -> 继续 LINE_FOLLOW 约 0.60 m（约 5.08 s）
   -> 未检测第二个 T：LINE_STOP -> 固定 omega=+0.80 刷新 11.5 s -> STOP / ACK
      若期间检测到第二个 T：沿用 LEFT -> LINE_REACQUIRED + TURN_DONE，再 LINE_STOP
   -> 复用现有抓取分段：0.38 m 巡线到墙、0.05 m 后退、抓取、0.30 m 后退、放置和静止姿态
-  -> 固定 VEL omega=-0.80 刷新 11.5 s -> STOP / ACK
+  -> 固定 VEL omega=-0.80 刷新 12.78 s（约100°）-> STOP / ACK
   -> NEXT_TURN,RIGHT -> LINE_START
   -> 第三个 T：JUNCTION_DETECTED -> 立即 LINE_STOP / ACK
   -> 固定 VEL.Y=+0.80 刷新 2.2 s 到中心 -> STOP / ACK
@@ -570,7 +570,7 @@ STOP / ACK -> NEXT_TURN,RIGHT -> LINE_START
   -> BUILD_ZONE_REACHED
 ```
 
-首个路口由巡线状态机执行并严格校验 RIGHT 方向；末端强制右转参数集中为 `FINAL_JUNCTION_ADVANCE_TIME=2.2`、`FINAL_JUNCTION_ADVANCE_SPEED=0.80`、`FINAL_TURN_TIME=11.5`、`FINAL_TURN_OMEGA=-0.80`。中间近距离路口使用 `SECOND_JUNCTION_DISTANCE=0.60`、当前速度基线换算约5.08 s，以及固定 LEFT `+0.80/11.5 s`。返回巡线仍使用固定 RIGHT `-0.80/11.5 s`。Fake 测试覆盖首路口错误 LEFT 会进入 FAULT 并安全停车、末端残留 `TURN_STARTED,LEFT` 不会覆盖强制右转，以及中间路口漏检/意外检测均只执行一次 LEFT；这些结果不代表实车标定完成。
+首个路口由巡线状态机执行并严格校验 RIGHT 方向，STM32 `LINENAV_TURN_RIGHT_TIME_MS=12140` 对应约95°。末端强制右转参数集中为 `FINAL_JUNCTION_ADVANCE_TIME=2.2`、`FINAL_JUNCTION_ADVANCE_SPEED=0.80`、`FINAL_TURN_TIME=11.5`、`FINAL_TURN_OMEGA=-0.80`。中间近距离路口使用 `SECOND_JUNCTION_DISTANCE=0.60`、当前速度基线换算约5.08 s，以及固定 LEFT `+0.80/11.5 s`。返回巡线使用固定 RIGHT `-0.80/12.78 s`，对应约100°。Fake 测试覆盖首路口错误 LEFT 会进入 FAULT 并安全停车、末端残留 `TURN_STARTED,LEFT` 不会覆盖强制右转，以及中间路口漏检/意外检测均只执行一次 LEFT；这些结果不代表实车标定完成。
 
 ### 6.5 STM32 入口
 
@@ -578,7 +578,7 @@ STM32 不在本 Git 仓库中。当前外部源码入口为 `D:\Code\V1.3_vision
 
 同日按旧抓放候选测试需要，仅将外部 STM32 源码的 `RPI_VEL_Y_MAX_M_S` 从 `0.30f` 放宽到 `0.80f`；X 仍为 ±0.30，Omega 仍为 ±1.50，协议语法、ACK/ERR、REMOTE watchdog 和控制逻辑未改。ARMCC V5.06 update 7 再次全量构建并生成 HEX，结果为 0 error、1 个原有 `Test_All` 未引用警告；尚未烧录或实车验证。未烧录该版本时，旧固件会拒绝 `VEL.Y=±0.80`。
 
-2026-09-14 后续根据实车未识别右侧 T 的结果，候选从 `1110/1111` 扩展为左右对称的 `1110/0111/1111`。新增 raw `0x0E`（物理 `0111`）右侧证据锁存、`TURN_RIGHT` 状态、负 Omega 右转和同方向搜索；右转时间暂沿用同次标定的 11500 ms。纯 C++ 主机测试通过，ARMCC V5.06 update 7 全量构建为 0 error、1 个原有 warning，并重新生成 HEX；尚未烧录或实车验证。
+2026-09-14 后续根据实车未识别右侧 T 的结果，候选从 `1110/1111` 扩展为左右对称的 `1110/0111/1111`。新增 raw `0x0E`（物理 `0111`）右侧证据锁存、`TURN_RIGHT` 状态、负 Omega 右转和同方向搜索；当时右转时间沿用同次标定的 11500 ms。2026-09-18 根据首路口约95°需求，将独立 RIGHT 定时按90°/11500 ms比例调整为12140 ms，LEFT仍为11500 ms；ARMCC V5.06 update 7 全量构建为0 error、1个原有 warning并重新生成HEX，尚未烧录或实车验证。
 
 当前 `LINE_START` 非阻塞状态机如下：
 
@@ -590,7 +590,7 @@ LINE_START
   -> JUNCTION_DETECTED (三种候选连续共 8 次，期间未恢复 0110)
   -> ADVANCE_TO_CENTER (2200 ms，保持当前巡线前进速度)
   -> 1110: TURN_LEFT / 0111: TURN_RIGHT / 1111: pending LEFT或RIGHT消歧
-     (左右均11500 ms，Omega分别为+0.80/-0.80)
+     (LEFT 11500 ms，RIGHT 12140 ms；Omega分别为+0.80/-0.80)
   -> SEARCH_LINE (保持当前转向，最长 2000 ms)
   -> LINE_REACQUIRED
   -> JUNCTION_COOLDOWN (3000 ms)
@@ -615,7 +615,7 @@ LINE_START
 - Servo、Stepper 与完整三组机械臂搭建动作。
 - K230D 视觉对准、前进、停车确认和人工触发搭建的第一版联调。
 
-2026-09-11 后续现场结果确认：当前固件的 `LINE_START` 已能完成直线巡线，轻微蛇形暂可接受，本轮不调整控制参数。2026-09-14 坡道抗误检门控及左右候选通过纯 C++ 主机测试和 ARMCC V5 全量编译；主机测试包含 10 分钟 `0110` 仿真、100 轮少于 8 帧的 `1110/0111/1111` 扰动、三种候选的 8 帧确认、左右方向锁存、拒绝与 cooldown 边界。以上是软件仿真而非实车结论，仍需烧录后完成平路、坡道及左右真实 T 测试；Advance 2.2 s 和左右 Turn 11.5 s 均保持现有标定值。普通 LINE_FOLLOW 四路全白时仍继续前进，是继续保留的已知安全缺口。
+2026-09-11 后续现场结果确认：当前固件的 `LINE_START` 已能完成直线巡线，轻微蛇形暂可接受，本轮不调整控制参数。2026-09-14 坡道抗误检门控及左右候选通过纯 C++ 主机测试和 ARMCC V5 全量编译；主机测试包含 10 分钟 `0110` 仿真、100 轮少于 8 帧的 `1110/0111/1111` 扰动、三种候选的 8 帧确认、左右方向锁存、拒绝与 cooldown 边界。以上是软件仿真而非实车结论，仍需烧录后完成平路、坡道及左右真实 T 测试；Advance保持2.2 s，LEFT保持11.5 s，RIGHT于2026-09-18调整为12.14 s。普通 LINE_FOLLOW 四路全白时仍继续前进，是继续保留的已知安全缺口。
 
 同场 AprilTag 单项测试可稳定输出正确 id 和 `error_x`，最远约 2.7 m 可检测。固定现场条件下记录的面积样本为：30 cm≈82767.9、60 cm≈16454.4、90 cm≈9839.2、120 cm≈5120.1、170 cm≈2594.9、200 cm≈1580.6、240 cm≈1307.5、270 cm≈1118.0。像素面积受 Tag、相机固定方式和视角影响，这些样本不能替代本次到站链路的 `arrival_area` 实车标定。
 
@@ -663,12 +663,12 @@ Pi 工作区和 Git 历史中没有 `docs/STM32_PROJECT_MAP.md` 和 `docs/STM32_
 
 建议按以下顺序推进，每一步先做无运动模拟，再做单项实机验证：
 
-1. 烧录前人工复核 1500 ms / 20 次 / 8 次 / 3000 ms 四个检测参数，以及正 Omega 左转、负 Omega 右转符号、2.2 s/11.5 s 定时值和 2 s 搜索 timeout；保留当前固件以便回退。
+1. 烧录前人工复核 1500 ms / 20 次 / 8 次 / 3000 ms 四个检测参数，以及正 Omega 左转、负 Omega 右转符号、2.2 s前进、11.5 s LEFT、12.14 s RIGHT 和 2 s 搜索 timeout；保留当前固件以便回退。
 2. 先架空轮或安全支撑验证 STOP 能在 `ADVANCE_TO_CENTER`、`TURN_LEFT`、`TURN_RIGHT`、`SEARCH_LINE` 任一阶段立即急停，并验证 `1110 -> LEFT`、`0111 -> RIGHT`、全黑加 `NEXT_TURN,RIGHT -> RIGHT` 的事件方向。
 3. 再进入低风险场地，依次完成平路直线连续 10 分钟无误触发、上坡扰动不误触发、左右真实 T 都能完整输出 `JUNCTION_DETECTED -> ADVANCE -> TURN -> SEARCH -> LINE_REACQUIRED`；记录传感器序列、实际前进距离、左右转角和重捕用时。
 4. 单 T 左右转稳定后，分阶段验证“右转重捕 -> LINE_STOP -> Servo1/2/4=0/0/135 -> LINE_START -> 巡线0.38 m到墙”，确认机械臂在靠墙前已经取得足够空间；再验证0.05 m后退、抓取、0.30 m后退和放置，全部单项安全后才运行 `competition/grab_mission.py`。两个后退段应分别测量实际速度，不能直接把当前0.118 m/s前进基线视为最终标定。STRAIGHT和多路口RouteExecutor组合仍需另行恢复/验证。
-5. 完成前三项后分段验证 `competition/full_mission.py`：先架空轮确认首个 `JUNCTION_DETECTED` 由 STM32 完成 RIGHT 和重捕线；随后标定 0.60 m 固定段与 LEFT，确认中间路口漏检或意外检测都只转一次；再验证末端 `JUNCTION_DETECTED` 后 LINE_STOP 能终止 STM32 自动转向，并分别标定 2.2 s 前进到中心和 11.5 s 强制 RIGHT；最后串联抓取和返回巡线。到达末端路口后只确认 `BUILD_ZONE_REACHED` 和 STOP，不执行搭建动作。
+5. 完成前三项后分段验证 `competition/full_mission.py`：先架空轮确认首个 `JUNCTION_DETECTED` 由 STM32 以12.14 s完成约95° RIGHT和重捕线；随后标定 0.60 m 固定段与 LEFT，确认中间路口漏检或意外检测都只转一次；抓取后验证12.78 s约100°回线RIGHT；再验证末端 `JUNCTION_DETECTED` 后 LINE_STOP 能终止 STM32 自动转向，并分别标定 2.2 s 前进到中心和 11.5 s 强制 RIGHT。到达末端路口后只确认 `BUILD_ZONE_REACHED` 和 STOP，不执行搭建动作。
 6. 多路口与最终 Tag 到站稳定后，再设计 RouteExecutor 接入 CompetitionRunner 的事件和 live 生命周期；当前 `competition/main.py` 继续固定 simulation mode。
 7. 继续单独处理普通 LINE_FOLLOW 下持续 `0000` 和近距离 Tag 移出画面的安全风险，并现场测量 Tag、T 字路口和停车点；本轮未改变 AprilTag 算法或坐标 TODO。
 
-当前最准确的完成度描述是：STM32 直线巡线、AprilTag 单项检测以及独立人工入口的“指定 Tag 到站—STOP ACK—ARRIVED—拓扑位置更新”已有现场结果。STM32 单 T 软件状态机具备 1500 ms 启动保护、稳定中心线 arming、`1110/0111/1111` 8 帧候选确认、左右方向锁存和 3000 ms cooldown；纯检测器主机测试和 Keil 全量编译通过，但新右转尚未烧录实测。Advance、Search、普通巡线 PID 与速度保持原实现，RIGHT 使用与 LEFT 等幅反向 Omega 和相同 11.5 s 初值。Pi 已具备不含视觉与搭建动作的完整固定路线软件闭环及 Fake 测试，但尚未整车实测；STRAIGHT、通用 RouteExecutor 实车组合、普通巡线全白安全、近距离 Tag 丢失、搭建区精确停车、Tag 姿态修正和视觉完整比赛流程仍未完成。
+当前最准确的完成度描述是：STM32 直线巡线、AprilTag 单项检测以及独立人工入口的“指定 Tag 到站—STOP ACK—ARRIVED—拓扑位置更新”已有现场结果。STM32 单 T 软件状态机具备 1500 ms 启动保护、稳定中心线 arming、`1110/0111/1111` 8 帧候选确认、左右方向锁存和 3000 ms cooldown；纯检测器主机测试通过，RIGHT 当前按约95°设置为12.14 s并通过ARMCC全量构建，但尚未烧录实测。Advance、Search、普通巡线 PID 与速度保持原实现，RIGHT 使用与 LEFT 等幅反向 Omega，LEFT仍为11.5 s。Pi 已具备不含视觉与搭建动作的完整固定路线软件闭环及 Fake 测试，抓取后回线RIGHT已按约100°改为12.78 s，但尚未整车实测；STRAIGHT、通用 RouteExecutor 实车组合、普通巡线全白安全、近距离 Tag 丢失、搭建区精确停车、Tag 姿态修正和视觉完整比赛流程仍未完成。

@@ -177,7 +177,7 @@ STM32 -> Pi: ERR,TURN_TIMEOUT
 
 普通线常见 `0110`。当前候选同时接受左侧扩宽 `1110`（raw `0x07`）、右侧扩宽 `0111`（raw `0x0E`）和全黑 `1111`（raw `0x0F`），连续 8 个约 10 ms 的 `LineNav.Update()` 周期才确认；`0000` 不属于路口。确认期间任意非候选值都会取消本次候选，并要求重新完成普通线 arming。
 
-连续候选中出现 `1110` 时锁存 LEFT，出现 `0111` 时锁存 RIGHT；后续 `1111` 不会抹掉已经取得的方向证据。如果 8 帧全部为 `1111`，或左右证据发生冲突，则使用预设的 `NEXT_TURN,LEFT/RIGHT` 消除歧义；没有可用预设时保留旧 LEFT 回退。LEFT 使用 `omega=+0.80 rad/s`，RIGHT 使用 `omega=-0.80 rad/s`，两者当前定时均为 11500 ms。前进到旋转中心后按锁存方向转动，随后保持同方向搜索；连续 3 周期重新读到宽松线型后发送 `LINE_REACQUIRED` 和 `TURN_DONE,<LEFT|RIGHT>`，并恢复原 `0.80 m/s` `Follow_Straight()`。
+连续候选中出现 `1110` 时锁存 LEFT，出现 `0111` 时锁存 RIGHT；后续 `1111` 不会抹掉已经取得的方向证据。如果 8 帧全部为 `1111`，或左右证据发生冲突，则使用预设的 `NEXT_TURN,LEFT/RIGHT` 消除歧义；没有可用预设时保留旧 LEFT 回退。LEFT 使用 `omega=+0.80 rad/s`、定时 11500 ms；RIGHT 使用 `omega=-0.80 rad/s`、按 90°/11500 ms 比例调整为约 95°/12140 ms。前进到旋转中心后按锁存方向转动，随后保持同方向搜索；连续 3 周期重新读到宽松线型后发送 `LINE_REACQUIRED` 和 `TURN_DONE,<LEFT|RIGHT>`，并恢复原 `0.80 m/s` `Follow_Straight()`。
 
 同一物理路口由 3000 ms cooldown 去重，之后重新等待 20 个连续 `0110` 完成 arming。搜索宽松线型最多等待 2000 ms，超时会 `Emergency_Stop()`、进入 fault 并上报 `ERR,REACQUIRE_TIMEOUT`。普通 LINE_FOLLOW 下持续 `0000` 仍可能按旧逻辑前进，这是未解决的已知风险；转向/重捕阶段则受 timeout 限制。新增 `0111 -> RIGHT` 已通过纯 C++ 主机测试和 ARMCC 全量编译，尚未烧录和实车验证。
 
@@ -310,7 +310,7 @@ main_controller_align.py（唯一 serial.Serial）
 3. 若 `sensor_ok=0`，继续检查 PC4/PC5 接线、供电、上拉、设备地址及三个 ACK 阶段；不要绕过传感器强制启动车辆。
 4. 建立外部 STM32 源码、Keil 产物、烧录时间和现场结果的版本对应关系。
 5. 架空轮先验证物理 `1110 -> TURN_STARTED,LEFT`、`0111 -> TURN_STARTED,RIGHT` 和全黑时 `NEXT_TURN,RIGHT` 的方向，再进入安全场地验证重捕线和继续巡线。
-6. 现场标定 8 次候选确认、20 次 arming、3000 ms cooldown、2.2 s 前进到中心、左右 11.5 s 转向、0.80 rad/s 转速和 2000 ms 重捕 timeout；在此之前不能把这些参数视为最终值。
+6. 现场标定 8 次候选确认、20 次 arming、3000 ms cooldown、2.2 s 前进到中心、LEFT 11.5 s、RIGHT 12.14 s、0.80 rad/s 转速和 2000 ms 重捕 timeout；在此之前不能把这些参数视为最终值。
 7. `LINE_DONE` 和比赛到站事件仍未定义；`TURN_DONE` 只表示一次路口动作完成并重新捕获 `0110`。
 
 完成上述验证前，不要让比赛状态机依赖新增路口事件，也不要扩大任何运动参数。

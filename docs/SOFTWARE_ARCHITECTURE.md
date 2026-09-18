@@ -54,7 +54,7 @@ Logitech C270 ──USB Video───┼──> Raspberry Pi 5
 | 巡线传感器采样 | `tests/test_line_sensor_capture.py` | 只读轮询 LINE_STATUS、人工标记并保存 CSV | 工具与 Fake 测试完成；真实 CSV 已作为路口第一版输入 |
 | 路口协议/人工入口 | `hardware/stm32_link.py`、`tests/test_junction_turn.py` | 直接选动作或规划路线后预设首个 NEXT_TURN，严格 START 后单项实机测试 | 协议和 Fake 测试完成；TURN_DONE 后 STOP，未接入 Runner，未实车验证 |
 | 比赛入口 | `competition/main.py` | 初始化上述接口并打印状态 | 安全骨架完成；不连接硬件 |
-| 固定路线比赛入口 | `competition/full_mission.py` | 首个JUNCTION沿用LineNav RIGHT，末端JUNCTION停止LineNav并由Pi强制前进到中心/RIGHT，中间串联0.60 m后LEFT、抓取和回线 | 代码与 Fake 测试完成；不使用视觉、不执行搭建动作，待整车实测 |
+| 固定路线比赛入口 | `competition/full_mission.py` | 首个JUNCTION沿用LineNav约95° RIGHT，末端JUNCTION停止LineNav并由Pi强制前进到中心/RIGHT，中间串联0.60 m后LEFT、抓取和约100°回线RIGHT | 代码与 Fake 测试完成；不使用视觉、不执行搭建动作，待整车实测 |
 | 局部主控 | `main_controller_align.py` | K230D 对准、接近、停车、人工触发搭建 | 第一版联调完成 |
 | 机械动作 | `arm_sequence.py` | 已验证的三组搭建动作 | 已接入局部主控 |
 | 独立入口 | `build_sequence.py` | 单独回归机械臂完整动作 | 已实机使用 |
@@ -112,7 +112,7 @@ FullMission
     -> STOP / ACK
     -> NEXT_TURN,RIGHT / ACK -> LINE_START / ACK
   LINE_TO_GRAB
-    -> first JUNCTION_DETECTED -> STM32 advance/RIGHT/search
+    -> first JUNCTION_DETECTED -> STM32 advance/RIGHT 12.14 s (about 95 deg)/search
     -> TURN_STARTED,RIGHT -> LINE_REACQUIRED + TURN_DONE,RIGHT
     -> NEXT_TURN,LEFT / ACK
     -> LINE_FOLLOW fixed 0.60 m / about 5.08 s
@@ -124,7 +124,7 @@ FullMission
     -> grab_task 既有 PREPARE/PICK/PLACE/REST 动作分段
     -> grab_mission 既有 0.38 m 到墙、0.05 m + 0.30 m 后退时序
   RETURN_TO_LINE
-    -> VEL omega=-0.80，固定刷新 11.5 s -> STOP / ACK
+    -> VEL omega=-0.80，固定刷新 12.78 s（约100°）-> STOP / ACK
     -> NEXT_TURN,RIGHT / ACK -> LINE_START / ACK
   LINE_TO_BUILD / TURN_TO_BUILD
     -> third JUNCTION_DETECTED -> LINE_STOP / ACK
@@ -133,7 +133,7 @@ FullMission
     -> BUILD_ZONE_REACHED -> FINISHED
 ```
 
-首个路口接受 STM32 巡线状态机的方向选择，并严格要求完整的 `TURN_STARTED,RIGHT`、`LINE_REACQUIRED` 和 `TURN_DONE,RIGHT`；方向不符时进入 `FAULT` 并安全停车。中间近距离路口以 0.60 m 定距段为主；若期间收到 `JUNCTION_DETECTED`，沿用现有 LEFT 事件，否则固定 LEFT。末端路口在 `JUNCTION_DETECTED` 后立即 `LINE_STOP`，以现有受控初值复现 2.2 s 前进到中心，再由 Pi 固定 RIGHT；即使 STM32 已排队上报 `TURN_STARTED,LEFT`，也不会让该方向决定末端任务。所有定时值均待整车标定，任意 `ERR,...` 或超时进入 `FAULT`。
+首个路口接受 STM32 巡线状态机的方向选择，并以12.14 s执行约95° RIGHT，严格要求完整的 `TURN_STARTED,RIGHT`、`LINE_REACQUIRED` 和 `TURN_DONE,RIGHT`；方向不符时进入 `FAULT` 并安全停车。中间近距离路口以 0.60 m 定距段为主；若期间收到 `JUNCTION_DETECTED`，沿用现有 LEFT 事件，否则固定 LEFT。抓取后的回线 RIGHT 以12.78 s执行约100°。末端路口在 `JUNCTION_DETECTED` 后立即 `LINE_STOP`，以现有受控初值复现 2.2 s 前进到中心，再由 Pi 固定 RIGHT；即使 STM32 已排队上报 `TURN_STARTED,LEFT`，也不会让该方向决定末端任务。所有定时值均待整车标定，任意 `ERR,...` 或超时进入 `FAULT`。
 
 ### 3.2 competition 视觉接近组件
 
@@ -278,7 +278,7 @@ Pi Stm32Link.set_next_turn(LEFT / RIGHT / STRAIGHT)
   -> 3000 ms cooldown后重新等待20周期0110完成arming
 ```
 
-候选逻辑接受“左三路全黑或右三路全黑”，即物理 `1110/0111/1111`，不会把 `0000` 当路口。连续候选内的方向证据会锁存，所以 `0111 -> 1111` 仍保持 RIGHT；全黑或左右证据冲突时优先使用 pending LEFT/RIGHT，没有可用预设则保留旧 LEFT 回退。LEFT/RIGHT 分别使用正/负 omega，当前两边都沿用 11.5 s 的 90°实测时间；搜索阶段保持相同符号。重捕宽松线型 2000 ms 超时会急停并上报 `ERR,REACQUIRE_TIMEOUT`。速度、时间和连续周期均集中为常量，右转仍待烧录和实车标定。
+候选逻辑接受“左三路全黑或右三路全黑”，即物理 `1110/0111/1111`，不会把 `0000` 当路口。连续候选内的方向证据会锁存，所以 `0111 -> 1111` 仍保持 RIGHT；全黑或左右证据冲突时优先使用 pending LEFT/RIGHT，没有可用预设则保留旧 LEFT 回退。LEFT/RIGHT 分别使用正/负 omega；LEFT保持11.5 s，RIGHT由90°/11.5 s按比例调整为约95°/12.14 s，搜索阶段保持相同符号。重捕宽松线型 2000 ms 超时会急停并上报 `ERR,REACQUIRE_TIMEOUT`。速度、时间和连续周期均集中为常量，右转仍待烧录和实车标定。
 
 Pi 已在独立纯软件层把 BFS 节点路线转换成路口动作，但没有接入 CompetitionRunner。`tests/test_junction_turn.py` 可直接使用 `--turn ...`，也可使用 `--start ... --target ...` 规划并打印完整 route/actions；路线从路口起步时还要求 `--heading ...`。两种模式都只取第一个动作，只有操作者输入严格大写 `START` 后才连接 STM32、预设动作并启动巡线。`TURN_DONE` 后入口要求 STOP ACK 并退出；timeout、方向不匹配、Ctrl+C 或其他异常也会进入 FAULT/清理 STOP，不会自动连续运行第二个路口。
 
@@ -728,6 +728,6 @@ tests/test_visual_grab_sequence.py 人工确认后撞墙、K230D视觉定位、�
 STM32 唯一串口链路
 ```
 
-仍未完成的部分包括：实车验证首路口 LineNav RIGHT 和重捕线、末端路口 LINE_STOP 是否能及时终止自动转向，标定末端2.2 s中心前进与11.5 s强制RIGHT、第一转后0.60 m与固定LEFT、抓取后固定RIGHT和 `FullMission` 整车链路，处理普通巡线全白等安全问题，确认搭建区精确停车，以及后续视觉/随机物块/正式搭建动作。STOPDBG 继续保留供早前偶发 ACK timeout 再次出现时使用。
+仍未完成的部分包括：实车验证首路口12.14 s约95° LineNav RIGHT和重捕线、抓取后12.78 s约100°固定RIGHT、末端路口 LINE_STOP 是否能及时终止自动转向，标定末端2.2 s中心前进与11.5 s强制RIGHT、第一转后0.60 m与固定LEFT和 `FullMission` 整车链路，处理普通巡线全白等安全问题，确认搭建区精确停车，以及后续视觉/随机物块/正式搭建动作。STOPDBG 继续保留供早前偶发 ACK timeout 再次出现时使用。
 
 实现顺序应继续优先保证协议和串口所有权，其次接入状态转换，最后再标定世界坐标和视觉阈值。不要在全自动状态机未可观测、未可安全停车前一次性叠加全部动作。
