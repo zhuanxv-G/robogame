@@ -98,7 +98,7 @@ robogame/
 - AprilTag 检测器、服务接口和轻量定位接口已经建立。
 - 场地区域、Tag 和巡线拓扑世界模型已经建立，未知实测坐标保留为 TODO。
 - `MissionState`、`MissionController` 和安全的比赛入口骨架已经建立。
-- `competition/full_mission.py` 已串联第一次 RIGHT 路口、中间固定巡线 0.60 m 后 LEFT、现有抓取流程、固定回线右转和最后一次 RIGHT 路口；纯软件测试完成，待整车实测。
+- `competition/full_mission.py` 在首个路口事件后由 Pi 强制执行 2.2 s 前进到中心和固定 RIGHT，随后串联固定巡线 0.60 m 后 LEFT、现有抓取流程、固定回线右转和最后一次 RIGHT 路口；纯软件测试完成，待整车实测。
 - `TaskController.build()` 和 `reset_arm()` 分别复用已验证的 `ArmSequence.run_all()` 与 `safe_home()`。
 - 机械臂三组搭建动作、Stepper 完成等待和安全 HOME 有实机验证记录。
 - `main_controller_align.py` 已完成 K230D 对准、接近、停车确认和人工触发搭建的第一版联调。

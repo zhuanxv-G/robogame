@@ -10,7 +10,7 @@ RoboGame 是一套参加 RoboGame 2026 竞技组比赛的移动机器人系统�
 
 当前采用上下位机分工：Raspberry Pi 5 负责视觉结果处理、比赛状态和任务决策；STM32F407ZGT6 负责底盘、巡线、Servo 和 Stepper 的实时执行。K230D / CanMV 作为独立视觉协处理器，把目标检测结果发送给 Pi；Logitech C270 USB Camera 直接连接 Pi，用于 AprilTag 检测。
 
-项目已从单项硬件调试进入整车联调阶段。2026-09-18 新增 `competition/full_mission.py`，形成第一版不使用 K230D、AprilTag、视觉定位和随机物块策略的固定路线软件闭环。针对第一、第二个路口仅约 60 cm、LineNav 来不及重新稳定识别的问题，第一次 RIGHT 转弯重捕后继续巡线 0.60 m；若期间没有第二个路口事件，就按固定 `omega=+0.80、11.5 s` 直接 LEFT，若意外检测到则沿用现有 LEFT 事件流程以避免重复转弯。之后复用现有抓取动作及 0.05 m + 0.30 m 后退，按固定时间原地右转返回巡线，再通过最后一个 RIGHT 路口进入搭建区并停车；搭建动作本轮不执行。入口已通过 Fake 纯软件测试，尚未整车实测。
+项目已从单项硬件调试进入整车联调阶段。2026-09-18 新增 `competition/full_mission.py`，形成第一版不使用 K230D、AprilTag、视觉定位和随机物块策略的固定路线软件闭环。现场发现首个路口虽然预设 RIGHT，STM32 仍会根据 `1110` 方向证据启动 LEFT；因此当前流程在首个 `JUNCTION_DETECTED` 后立即 `LINE_STOP`，由 Pi 复用现有 2.2 s 前进到中心基线，再按固定 `omega=-0.80、11.5 s` 强制 RIGHT，之后重新 `LINE_START`。针对第二个路口仅约 60 cm、LineNav 来不及重新稳定识别的问题，继续巡线 0.60 m 后固定 LEFT；若期间意外检测到第二路口，则沿用现有 LEFT 事件流程以避免重复转弯。之后复用既有抓取及返回流程；全部新定时参数仍待整车标定。
 
 ## 2. 当前目录结构
 
@@ -144,7 +144,7 @@ Pi 仓库中没有 STM32 的 `.c`、`.h`、`.ioc`、链接脚本或 IDE 工程�
 | 路口协议与人工入口 | 软件完成，待烧录/实车 | `test_junction_turn.py` 支持直接指定动作，或由 start/target 规划路线并只取首个动作；严格输入 `START` 后才连接，`TURN_DONE` 后 STOP，不会连续跑多个路口 |
 | 巡线到抓取墙测试 | Pi 入口完成，待烧录/实车 | `test_line_to_wall.py` 使用现有协议执行启动 STOP、预设 RIGHT、LINE_START、等待首个 `JUNCTION_DETECTED` 和 `LINE_REACQUIRED`，再保持 LINE_FOLLOW 约 3.22 s 后 LINE_STOP；STM32 已补上 `0111 -> RIGHT`，尚未烧录 |
 | 巡线到抓取完整任务 | Pi 入口完成，待实车 | `competition/grab_mission.py` 在右转重捕后先 LINE_STOP并前伸机械臂，再LINE_START巡线0.38 m到墙；随后后退0.05 m、抓取、后退0.30 m、放置并进入95/135/90/95/90静止姿态。全程STOP/ERR/Ctrl+C安全收尾，未实车 |
-| 固定路线完整比赛流程 | 代码与 Fake 测试完成，待整车实测 | `competition/full_mission.py` 使用唯一 Stm32Link 串联 RIGHT -> 巡线0.60 m后固定LEFT（若检测到第二路口则沿用事件LEFT）-> 抓取/后退约0.35 m -> 固定11.5 s右转回线 -> RIGHT -> BUILD_ZONE_REACHED；不启用视觉或搭建动作 |
+| 固定路线完整比赛流程 | 代码与 Fake 测试完成，待整车实测 | 首个JUNCTION后LINE_STOP -> 固定前进2.2 s到中心 -> 固定RIGHT；再巡线0.60 m后固定LEFT（若检测到第二路口则沿用事件LEFT）-> 抓取/后退约0.35 m -> 固定右转回线 -> 末端RIGHT -> BUILD_ZONE_REACHED |
 | K230D视觉辅助单次抓取实验 | 代码完成，待实车 | `tests/test_visual_grab_sequence.py` 复用已验证的机械臂准备、撞墙、后撤、抓取与放盒动作，抓取前插入 K230D SEARCH/ALIGN/READY 视觉定位；验证 K230D 能否替代固定抓取位置；不接入比赛状态机 |
 | competition 流程调度 | 第一版模拟流程完成 | `CompetitionRunner` 通过外部事件串联巡线、橙色目标接近、抓取、搭建和结束；默认 simulation mode 不调用硬件控制器 |
 | 机械臂任务控制 | 橙色抓取已封装，待接入控制器 | `TaskController.build()` 复用 `ArmSequence.run_all()`，`reset_arm()` 复用 `safe_home()`；新增 `competition/grab_task.py` 把已实机验证的旧版机械臂抓取动作封装为 `grab_orange()`，`TaskController.grab_orange()` 保持 NotImplemented，接线留待后续 |
@@ -556,8 +556,10 @@ python3 -m competition.full_mission
 
 ```text
 STOP / ACK -> NEXT_TURN,RIGHT -> LINE_START
-  -> 第一个 T：JUNCTION_DETECTED -> RIGHT -> LINE_REACQUIRED + TURN_DONE
-  -> NEXT_TURN,LEFT -> 继续 LINE_FOLLOW 约 0.60 m（约 5.08 s）
+  -> 第一个 T：JUNCTION_DETECTED -> 立即 LINE_STOP / ACK
+  -> VEL.Y=+0.80 刷新 2.2 s 前进到中心 -> STOP / ACK
+  -> 固定 VEL omega=-0.80 刷新 11.5 s 强制 RIGHT -> STOP / ACK
+  -> NEXT_TURN,LEFT -> LINE_START -> 继续 LINE_FOLLOW 约 0.60 m（约 5.08 s）
   -> 未检测第二个 T：LINE_STOP -> 固定 omega=+0.80 刷新 11.5 s -> STOP / ACK
      若期间检测到第二个 T：沿用 LEFT -> LINE_REACQUIRED + TURN_DONE，再 LINE_STOP
   -> 复用现有抓取分段：0.38 m 巡线到墙、0.05 m 后退、抓取、0.30 m 后退、放置和静止姿态
@@ -567,7 +569,7 @@ STOP / ACK -> NEXT_TURN,RIGHT -> LINE_START
   -> STOP / ACK -> BUILD_ZONE_REACHED
 ```
 
-`SECOND_JUNCTION_DISTANCE=0.60`、`SECOND_JUNCTION_DRIVE_TIME=0.60/0.118≈5.08 s`、`TURN_TO_GRAB_TIME=11.5` 和 `TURN_TO_GRAB_OMEGA=+0.80` 集中在入口顶部；0.118 m/s 是现有前进速度基线，距离和转向均待实车校准。返回巡线仍使用 `TURN_BACK_TO_LINE_TIME=11.5`、`TURN_BACK_TO_LINE_OMEGA=-0.80`。Servo、Stepper、0.05 m/0.30 m 后退和末端静止姿态继续复用受保护动作。Fake 测试同时覆盖“第二路口漏检后固定左转”和“第二路口意外检测后不重复左转”两条路径。
+第一处强制右转参数集中为 `FIRST_JUNCTION_ADVANCE_TIME=2.2`、`FIRST_JUNCTION_ADVANCE_SPEED=0.80`、`FIRST_TURN_TIME=11.5`、`FIRST_TURN_OMEGA=-0.80`。第二处使用 `SECOND_JUNCTION_DISTANCE=0.60`、当前速度基线换算约5.08 s，以及固定 LEFT `+0.80/11.5 s`。返回巡线仍使用固定 RIGHT `-0.80/11.5 s`。Fake 测试覆盖首路口残留 `TURN_STARTED,LEFT` 不会覆盖强制右转，以及第二路口漏检/意外检测均只执行一次 LEFT；这些结果不代表实车标定完成。
 
 ### 6.5 STM32 入口
 
@@ -664,7 +666,7 @@ Pi 工作区和 Git 历史中没有 `docs/STM32_PROJECT_MAP.md` 和 `docs/STM32_
 2. 先架空轮或安全支撑验证 STOP 能在 `ADVANCE_TO_CENTER`、`TURN_LEFT`、`TURN_RIGHT`、`SEARCH_LINE` 任一阶段立即急停，并验证 `1110 -> LEFT`、`0111 -> RIGHT`、全黑加 `NEXT_TURN,RIGHT -> RIGHT` 的事件方向。
 3. 再进入低风险场地，依次完成平路直线连续 10 分钟无误触发、上坡扰动不误触发、左右真实 T 都能完整输出 `JUNCTION_DETECTED -> ADVANCE -> TURN -> SEARCH -> LINE_REACQUIRED`；记录传感器序列、实际前进距离、左右转角和重捕用时。
 4. 单 T 左右转稳定后，分阶段验证“右转重捕 -> LINE_STOP -> Servo1/2/4=0/0/135 -> LINE_START -> 巡线0.38 m到墙”，确认机械臂在靠墙前已经取得足够空间；再验证0.05 m后退、抓取、0.30 m后退和放置，全部单项安全后才运行 `competition/grab_mission.py`。两个后退段应分别测量实际速度，不能直接把当前0.118 m/s前进基线视为最终标定。STRAIGHT和多路口RouteExecutor组合仍需另行恢复/验证。
-5. 完成前三项后分段验证 `competition/full_mission.py`：先标定第一次 RIGHT 重捕后的 0.60 m / 5.08 s 固定段和 `TURN_TO_GRAB_TIME`，确认第二个路口被漏检或意外检测时都只执行一次 LEFT；再标定抓取后固定右转的 `TURN_BACK_TO_LINE_TIME`，最后才允许串联抓取。到达最后一个路口后只确认 `BUILD_ZONE_REACHED` 和 STOP，不执行搭建动作。
+5. 完成前三项后分段验证 `competition/full_mission.py`：先架空轮确认首个 `JUNCTION_DETECTED` 后 LINE_STOP 能终止 STM32 的错误 LEFT，再分别标定 2.2 s 前进到中心和 11.5 s 强制 RIGHT；随后标定 0.60 m 固定段与 LEFT，确认第二路口漏检或意外检测都只转一次；最后再串联抓取和返回巡线。到达末端路口后只确认 `BUILD_ZONE_REACHED` 和 STOP，不执行搭建动作。
 6. 多路口与最终 Tag 到站稳定后，再设计 RouteExecutor 接入 CompetitionRunner 的事件和 live 生命周期；当前 `competition/main.py` 继续固定 simulation mode。
 7. 继续单独处理普通 LINE_FOLLOW 下持续 `0000` 和近距离 Tag 移出画面的安全风险，并现场测量 Tag、T 字路口和停车点；本轮未改变 AprilTag 算法或坐标 TODO。
 

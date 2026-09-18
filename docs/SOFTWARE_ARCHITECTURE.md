@@ -54,7 +54,7 @@ Logitech C270 ──USB Video───┼──> Raspberry Pi 5
 | 巡线传感器采样 | `tests/test_line_sensor_capture.py` | 只读轮询 LINE_STATUS、人工标记并保存 CSV | 工具与 Fake 测试完成；真实 CSV 已作为路口第一版输入 |
 | 路口协议/人工入口 | `hardware/stm32_link.py`、`tests/test_junction_turn.py` | 直接选动作或规划路线后预设首个 NEXT_TURN，严格 START 后单项实机测试 | 协议和 Fake 测试完成；TURN_DONE 后 STOP，未接入 Runner，未实车验证 |
 | 比赛入口 | `competition/main.py` | 初始化上述接口并打印状态 | 安全骨架完成；不连接硬件 |
-| 固定路线比赛入口 | `competition/full_mission.py` | 用唯一 Stm32Link 串联首个 RIGHT、固定0.60 m后LEFT、现有抓取流程、回线转向和末端RIGHT | 代码与 Fake 测试完成；不使用视觉、不执行搭建动作，待整车实测 |
+| 固定路线比赛入口 | `competition/full_mission.py` | 首个JUNCTION后停止LineNav并由Pi强制前进到中心/RIGHT，再串联0.60 m后LEFT、抓取、回线和末端RIGHT | 代码与 Fake 测试完成；不使用视觉、不执行搭建动作，待整车实测 |
 | 局部主控 | `main_controller_align.py` | K230D 对准、接近、停车、人工触发搭建 | 第一版联调完成 |
 | 机械动作 | `arm_sequence.py` | 已验证的三组搭建动作 | 已接入局部主控 |
 | 独立入口 | `build_sequence.py` | 单独回归机械臂完整动作 | 已实机使用 |
@@ -112,8 +112,11 @@ FullMission
     -> STOP / ACK
     -> NEXT_TURN,RIGHT / ACK -> LINE_START / ACK
   LINE_TO_GRAB
-    -> first JUNCTION_DETECTED -> TURN_STARTED/LINE_REACQUIRED/TURN_DONE RIGHT
-    -> NEXT_TURN,LEFT / ACK -> LINE_FOLLOW fixed 0.60 m / about 5.08 s
+    -> first JUNCTION_DETECTED -> immediate LINE_STOP / ACK
+    -> fixed VEL.Y=+0.80 for 2.2 s -> STOP / ACK
+    -> fixed VEL omega=-0.80 for 11.5 s -> STOP / ACK
+    -> NEXT_TURN,LEFT / ACK -> LINE_START / ACK
+    -> LINE_FOLLOW fixed 0.60 m / about 5.08 s
   TURN_TO_GRAB
     -> no second event: LINE_STOP -> fixed VEL omega=+0.80 for 11.5 s
     -> optional second event: use matching LEFT turn events instead
@@ -129,7 +132,7 @@ FullMission
     -> STOP / ACK -> BUILD_ZONE_REACHED -> FINISHED
 ```
 
-第一和最后一个路口仍严格要求 `JUNCTION_DETECTED` 后才接受方向一致的 `TURN_STARTED`，并同时等到同方向 `TURN_DONE` 与 `LINE_REACQUIRED`。中间近距离路口以 0.60 m 定距段为主：若定时段内收到 `JUNCTION_DETECTED`，就等待现有 LEFT 事件完成；否则先 `LINE_STOP`，再以 `omega=+0.80` 固定转 11.5 s。两条路径只会执行一次 LEFT。乱序、错误方向、`ERR,...` 或超时都进入 `FAULT`。0.60 m、5.08 s 和两个固定转向时间均待整车标定；本版本到达搭建区后只 STOP，不调用搭建动作。
+首个路口不再接受 STM32 的方向选择：`JUNCTION_DETECTED` 后立即 `LINE_STOP`，以现有受控初值复现 2.2 s 前进到中心，再由 Pi 固定 RIGHT。这样即使 STM32 已排队上报 `TURN_STARTED,LEFT`，收到 LINE_STOP ACK 后也不会让该方向决定任务。中间近距离路口以 0.60 m 定距段为主；若期间收到 `JUNCTION_DETECTED`，沿用现有 LEFT 事件，否则固定 LEFT。末端 RIGHT 仍严格校验完整路口事件。所有定时值均待整车标定，任意 `ERR,...` 或超时进入 `FAULT`。
 
 ### 3.2 competition 视觉接近组件
 
@@ -461,7 +464,7 @@ tests/test_old_grab_right_sequence.py
 | 拓扑导航状态 | current_location、current_tag、target_location | 只表示已确认地标和规划目标，不表示底盘已经执行路线 |
 | 路线执行状态 | IDLE、PLANNING、READY、WAITING_JUNCTION、TURNING、WAITING_TURN_DONE、ROUTE_TURNS_DONE、FINAL_TAG_APPROACH、ARRIVED、FINISHED、FAULT | 逐路口动作和最终 Tag 到站；当前动作下标可观察 |
 | CompetitionRunner 阶段 | START、FOLLOW_LINE、GET_ORANGE、VISUAL_APPROACH、GRAB_ORANGE、BUILD、FINISH、FAULT | 第一版比赛动作编排；完成事件当前只能外部注入 |
-| 固定路线 FullMission 状态 | START、LINE_TO_GRAB、TURN_TO_GRAB、GRAB、RETURN_TO_LINE、LINE_TO_BUILD、TURN_TO_BUILD、FINISHED、FAULT | 不使用视觉的独立 live 流程；中间近距离路口支持0.60 m固定LEFT兜底，待整车实测 |
+| 固定路线 FullMission 状态 | START、LINE_TO_GRAB、TURN_TO_GRAB、GRAB、RETURN_TO_LINE、LINE_TO_BUILD、TURN_TO_BUILD、FINISHED、FAULT | 首路口由Pi强制RIGHT，中间近距离路口支持0.60 m固定LEFT兜底，待整车实测 |
 | 旧比赛任务元数据 | `strategy/mission.py` 中 START、FOLLOW_LINE、GET_ORANGE、GET_PURPLE、BUILD | 已有任务计划数据，尚未迁移 |
 | 新比赛任务状态 | `competition/mission_state.py` 中 START、FOLLOW_LINE、GET_ORANGE、GET_PURPLE、BUILD、FINISH、FAULT | 未来比赛入口使用的顶层状态 |
 
@@ -724,6 +727,6 @@ tests/test_visual_grab_sequence.py 人工确认后撞墙、K230D视觉定位、�
 STM32 唯一串口链路
 ```
 
-仍未完成的部分包括：实车标定并验证 T 字路口 LEFT/RIGHT/STRAIGHT、第一转后 0.60 m 固定段与 11.5 s LEFT、抓取后 11.5 s 回线 RIGHT 和 `FullMission` 整车链路，处理普通巡线全白与近距离 Tag 移出画面的安全问题，把 RouteExecutor 接入 Runner，确认搭建区精确停车，实现 Tag 姿态修正，补入 GET_PURPLE、随机物块策略和正式搭建动作，以及系统化实机回归。STOPDBG 继续保留供早前偶发 ACK timeout 再次出现时使用。
+仍未完成的部分包括：实车验证首路口 LINE_STOP 是否能及时终止错误 LEFT，标定随后2.2 s中心前进与11.5 s强制RIGHT、第一转后0.60 m与固定LEFT、抓取后固定RIGHT和 `FullMission` 整车链路，处理普通巡线全白等安全问题，确认搭建区精确停车，以及后续视觉/随机物块/正式搭建动作。STOPDBG 继续保留供早前偶发 ACK timeout 再次出现时使用。
 
 实现顺序应继续优先保证协议和串口所有权，其次接入状态转换，最后再标定世界坐标和视觉阈值。不要在全自动状态机未可观测、未可安全停车前一次性叠加全部动作。
