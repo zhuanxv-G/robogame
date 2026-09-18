@@ -7,8 +7,12 @@ from collections import deque
 from unittest import mock
 
 from competition.full_mission import (
+    SECOND_JUNCTION_DISTANCE,
+    SECOND_JUNCTION_DRIVE_TIME,
     TURN_BACK_TO_LINE_OMEGA,
     TURN_BACK_TO_LINE_TIME,
+    TURN_TO_GRAB_OMEGA,
+    TURN_TO_GRAB_TIME,
     FullMission,
     FullMissionState,
     main,
@@ -59,10 +63,11 @@ class FakeStm32Link:
         self.clock = clock
         self.is_connected = False
         self.calls: list[object] = []
+        self.timed_calls: list[tuple[float, object]] = []
         self.lines: deque[bytes] = deque()
         self.line_start_count = 0
         self.first_line_batch = (
-            _turn_lines("RIGHT") + _turn_lines("LEFT")
+            _turn_lines("RIGHT")
             if first_line_batch is None
             else first_line_batch
         )
@@ -77,7 +82,9 @@ class FakeStm32Link:
         self.calls.append("close")
 
     def send_command(self, command: str) -> str:
-        self.calls.append(("send", command))
+        call = ("send", command)
+        self.calls.append(call)
+        self.timed_calls.append((self.clock(), call))
         if command == "LINE_START":
             self.line_start_count += 1
             if self.line_start_count == 1:
@@ -147,6 +154,10 @@ class FullMissionTests(unittest.TestCase):
         self.assertEqual(commands.count("LINE_STOP"), 2)
         self.assertIn("VEL,0.00,-0.80,0.00", commands)
         self.assertIn(
+            f"VEL,0.00,0.00,{TURN_TO_GRAB_OMEGA:.2f}",
+            commands,
+        )
+        self.assertIn(
             f"VEL,0.00,0.00,{TURN_BACK_TO_LINE_OMEGA:.2f}",
             commands,
         )
@@ -166,6 +177,25 @@ class FullMissionTests(unittest.TestCase):
         self.assertIn("[STATE] FINISHED", output)
         self.assertIn("[MISSION]", output)
         self.assertNotIn("close", link.calls)
+
+        left_preset_at = next(
+            timestamp
+            for timestamp, call in link.timed_calls
+            if call == ("send", "NEXT_TURN,LEFT")
+        )
+        first_line_stop_at = next(
+            timestamp
+            for timestamp, call in link.timed_calls
+            if call == ("send", "LINE_STOP")
+        )
+        self.assertGreaterEqual(
+            first_line_stop_at - left_preset_at,
+            SECOND_JUNCTION_DRIVE_TIME,
+        )
+        self.assertLess(
+            first_line_stop_at - left_preset_at,
+            SECOND_JUNCTION_DRIVE_TIME + 0.25,
+        )
 
     def test_wrong_first_turn_enters_fault_and_requests_stop(self) -> None:
         clock = FakeClock()
@@ -189,9 +219,41 @@ class FullMissionTests(unittest.TestCase):
         self.assertIs(mission.state, FullMissionState.FAULT)
         self.assertIn(("stop", False), link.calls)
 
-    def test_return_turn_parameters_are_current_fixed_baseline(self) -> None:
+    def test_fixed_route_parameters_use_current_speed_baseline(self) -> None:
+        self.assertEqual(SECOND_JUNCTION_DISTANCE, 0.60)
+        self.assertAlmostEqual(
+            SECOND_JUNCTION_DRIVE_TIME,
+            SECOND_JUNCTION_DISTANCE / 0.118,
+        )
+        self.assertEqual(TURN_TO_GRAB_TIME, 11.5)
+        self.assertEqual(TURN_TO_GRAB_OMEGA, 0.80)
         self.assertEqual(TURN_BACK_TO_LINE_TIME, 11.5)
         self.assertEqual(TURN_BACK_TO_LINE_OMEGA, -0.80)
+
+    def test_detected_second_junction_uses_existing_left_turn(self) -> None:
+        clock = FakeClock()
+        link = FakeStm32Link(
+            clock,
+            first_line_batch=(
+                _turn_lines("RIGHT") + _turn_lines("LEFT")
+            ),
+        )
+        link.is_connected = True
+
+        with mock.patch("competition.full_mission.execute_grab_steps"):
+            result = run_full_mission(
+                link,  # type: ignore[arg-type]
+                output=lambda line: None,
+                clock=clock,
+            )
+
+        self.assertIs(result, FullMissionState.FINISHED)
+        commands = _sent_commands(link)
+        self.assertNotIn(
+            f"VEL,0.00,0.00,{TURN_TO_GRAB_OMEGA:.2f}",
+            commands,
+        )
+        self.assertEqual(commands.count("LINE_STOP"), 2)
 
     def test_dry_run_never_constructs_hardware(self) -> None:
         calls = 0

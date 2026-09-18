@@ -4,7 +4,7 @@ This entry intentionally uses no K230D, AprilTag, visual localization, or
 random block strategy.  It composes the existing STM32 LineNav junction
 events with the protected grab-task action segments:
 
-    start -> RIGHT junction -> LEFT junction -> grab and retreat
+    start -> RIGHT junction -> fixed 0.60 m -> LEFT turn -> grab and retreat
           -> fixed RIGHT rotation -> reacquire LineNav
           -> RIGHT junction -> build zone -> stop
 
@@ -35,6 +35,7 @@ from competition.grab_mission import (  # noqa: E402
     LINE_DURATION,
     POST_PICK_RETREAT_DISTANCE,
     POST_PICK_RETREAT_TIME,
+    REAL_SPEED,
     SERIAL_POLL_TIMEOUT_S,
     TARGET_DISTANCE,
     TURN_TIMEOUT_S,
@@ -65,6 +66,16 @@ from hardware.stm32_link import (  # noqa: E402
 TURN_BACK_TO_LINE_TIME = 11.5
 TURN_BACK_TO_LINE_OMEGA = -0.80
 
+# The second junction is too close to the first for the current LineNav
+# re-arming/cooldown window to detect reliably.  Keep following the line for
+# this measured field distance, then perform the expected LEFT turn directly
+# if no junction event arrived.  The speed baseline is shared with the
+# existing grab mission and must be re-measured on the complete vehicle.
+SECOND_JUNCTION_DISTANCE = 0.60
+SECOND_JUNCTION_DRIVE_TIME = SECOND_JUNCTION_DISTANCE / REAL_SPEED
+TURN_TO_GRAB_TIME = 11.5
+TURN_TO_GRAB_OMEGA = 0.80
+
 
 class FullMissionState(str, Enum):
     """Observable phases of the fixed-route mission."""
@@ -94,6 +105,7 @@ class FullMission:
         self._output = output
         self._clock = clock
         self._state = FullMissionState.START
+        self._second_junction_detected: bool | None = None
         self._handlers: dict[FullMissionState, Callable[[], None]] = {
             FullMissionState.START: self._run_start,
             FullMissionState.LINE_TO_GRAB: self._run_line_to_grab,
@@ -156,19 +168,43 @@ class FullMission:
         self._output("Right turn")
         self._wait_for_turn(NextTurn.RIGHT)
 
-        # LineNav resumes automatically after TURN_DONE.  Preset only after
-        # the first turn has completed so the pending action cannot be
-        # overwritten early.
+        # LineNav resumes automatically after TURN_DONE.  Keep LEFT preset as
+        # a safe fallback if the close second junction is detected after all;
+        # otherwise the next state performs the same turn open-loop.
         self._send_with_ack(f"NEXT_TURN,{NextTurn.LEFT.value}")
         self._output("[LINE]")
-        self._output("Waiting second junction")
-        self._wait_for_junction()
+        self._output(
+            f"Following fixed {SECOND_JUNCTION_DISTANCE:.2f} m "
+            "toward second junction"
+        )
+        self._second_junction_detected = (
+            self._follow_to_second_junction_or_distance()
+        )
+        if not self._second_junction_detected:
+            self._output(
+                "[LINE] Second junction not detected; using fixed left turn"
+            )
+            self._send_with_ack("LINE_STOP")
         self._set_state(FullMissionState.TURN_TO_GRAB)
 
     def _run_turn_to_grab(self) -> None:
         self._output("[TURN]")
-        self._output("Left turn")
-        self._wait_for_turn(NextTurn.LEFT)
+        if self._second_junction_detected:
+            self._output("Left turn from detected second junction")
+            self._wait_for_turn(NextTurn.LEFT)
+            self._send_with_ack("LINE_STOP")
+        else:
+            self._output(
+                "Fixed left turn "
+                f"(omega={TURN_TO_GRAB_OMEGA:+.2f}, "
+                f"{TURN_TO_GRAB_TIME:.2f} s)"
+            )
+            self._drive_timed_velocity(
+                y=0.0,
+                omega=TURN_TO_GRAB_OMEGA,
+                duration_s=TURN_TO_GRAB_TIME,
+                stop_label="full_mission_fixed_left_turn",
+            )
         self._set_state(FullMissionState.GRAB)
 
     def _run_grab(self) -> None:
@@ -178,7 +214,6 @@ class FullMission:
         # This is the existing grab_mission choreography.  All Servo,
         # Stepper, waits, chassis distances and their ordering come from the
         # protected grab modules imported above.
-        self._send_with_ack("LINE_STOP")
         execute_grab_steps(
             self._stm32,
             PREPARE_ARM_STEPS,
@@ -297,6 +332,27 @@ class FullMission:
                     f"Out-of-order event before JUNCTION_DETECTED: {line}"
                 )
         raise TimeoutError("Timeout waiting for: JUNCTION_DETECTED")
+
+    def _follow_to_second_junction_or_distance(self) -> bool:
+        """Follow for 0.60 m, accepting an early real junction if emitted."""
+        deadline = self._clock() + SECOND_JUNCTION_DRIVE_TIME
+        while self._clock() < deadline:
+            line = self._read_protocol_line()
+            if line is None:
+                continue
+            if line == "JUNCTION_DETECTED":
+                self._output("[LINE] Second JUNCTION_DETECTED")
+                return True
+            if line.startswith(("TURN_STARTED,", "TURN_DONE,")) or (
+                line == "LINE_REACQUIRED"
+            ):
+                raise Stm32ProtocolError(
+                    f"Out-of-order event before second junction: {line}"
+                )
+        self._output(
+            f"[LINE] Fixed travel complete ({SECOND_JUNCTION_DRIVE_TIME:.2f} s)"
+        )
+        return False
 
     def _wait_for_turn(self, expected: NextTurn) -> None:
         deadline = self._clock() + TURN_TIMEOUT_S
@@ -483,8 +539,15 @@ def _default_stm32_factory() -> Stm32Link:
 
 def _print_plan(output: Callable[[str], object]) -> None:
     output("RoboGame FULL FIXED ROUTE MISSION")
-    output("route=RIGHT -> LEFT -> GRAB -> fixed RIGHT -> RIGHT -> BUILD")
+    output(
+        "route=RIGHT -> fixed 0.60 m -> LEFT -> GRAB "
+        "-> fixed RIGHT -> RIGHT -> BUILD"
+    )
     output(f"grab_line_approach={TARGET_DISTANCE:.2f} m")
+    output(f"first_to_second_junction={SECOND_JUNCTION_DISTANCE:.2f} m")
+    output(f"second_junction_drive_time={SECOND_JUNCTION_DRIVE_TIME:.2f} s")
+    output(f"fixed_left_turn_time={TURN_TO_GRAB_TIME:.2f} s")
+    output(f"fixed_left_turn_omega={TURN_TO_GRAB_OMEGA:.2f} rad/s")
     output(
         "grab_retreat="
         f"{BACKOFF_DISTANCE + POST_PICK_RETREAT_DISTANCE:.2f} m"
