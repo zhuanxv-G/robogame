@@ -7,16 +7,17 @@ from collections import deque
 from unittest import mock
 
 from competition.full_mission import (
-    FIRST_JUNCTION_ADVANCE_SPEED,
-    FIRST_JUNCTION_ADVANCE_TIME,
-    FIRST_TURN_OMEGA,
-    FIRST_TURN_TIME,
+    FINAL_JUNCTION_ADVANCE_SPEED,
+    FINAL_JUNCTION_ADVANCE_TIME,
+    FINAL_TURN_OMEGA,
+    FINAL_TURN_TIME,
     SECOND_JUNCTION_DISTANCE,
     SECOND_JUNCTION_DRIVE_TIME,
     TURN_BACK_TO_LINE_OMEGA,
     TURN_BACK_TO_LINE_TIME,
     TURN_TO_GRAB_OMEGA,
     TURN_TO_GRAB_TIME,
+    FullMission,
     FullMissionState,
     main,
     run_full_mission,
@@ -29,6 +30,7 @@ from competition.grab_task import (
     PRE_PLACE_SETTLE_STEPS,
     REST_ARM_STEPS,
 )
+from hardware.stm32_link import Stm32ProtocolError
 
 
 class FakeClock:
@@ -71,7 +73,7 @@ class FakeStm32Link:
         self.lines: deque[bytes] = deque()
         self.line_start_count = 0
         self.first_line_batch = (
-            [b"JUNCTION_DETECTED\r\n"]
+            _turn_lines("RIGHT")
             if first_line_batch is None
             else first_line_batch
         )
@@ -101,10 +103,10 @@ class FakeStm32Link:
             self.line_start_count += 1
             if self.line_start_count == 1:
                 self.lines.extend(self.first_line_batch)
-            elif self.line_start_count == 2:
-                self.lines.extend(self.second_line_batch)
-            elif self.line_start_count == 4:
+            elif self.line_start_count == 3:
                 self.lines.extend(self.final_line_batch)
+        elif command == "NEXT_TURN,LEFT":
+            self.lines.extend(self.second_line_batch)
         return command
 
     def wait_ack(self, command: str, timeout: float = 2.0) -> str:
@@ -164,29 +166,21 @@ class FullMissionTests(unittest.TestCase):
             [command for command in commands if command.startswith("NEXT_TURN")],
             ["NEXT_TURN,RIGHT", "NEXT_TURN,LEFT", "NEXT_TURN,RIGHT"],
         )
-        self.assertEqual(commands.count("LINE_START"), 4)
-        self.assertEqual(commands.count("LINE_STOP"), 4)
+        self.assertEqual(commands.count("LINE_START"), 3)
+        self.assertEqual(commands.count("LINE_STOP"), 3)
         self.assertIn(
-            f"VEL,0.00,{FIRST_JUNCTION_ADVANCE_SPEED:.2f},0.00",
+            f"VEL,0.00,{FINAL_JUNCTION_ADVANCE_SPEED:.2f},0.00",
             commands,
         )
         self.assertIn(
-            f"VEL,0.00,0.00,{FIRST_TURN_OMEGA:.2f}",
+            f"VEL,0.00,0.00,{FINAL_TURN_OMEGA:.2f}",
             commands,
         )
-        initial_line_start = commands.index("LINE_START")
-        first_line_stop = commands.index("LINE_STOP")
-        first_center_advance = commands.index(
-            f"VEL,0.00,{FIRST_JUNCTION_ADVANCE_SPEED:.2f},0.00"
-        )
-        first_fixed_right = commands.index(
-            f"VEL,0.00,0.00,{FIRST_TURN_OMEGA:.2f}"
+        final_center_advance = commands.index(
+            f"VEL,0.00,{FINAL_JUNCTION_ADVANCE_SPEED:.2f},0.00"
         )
         left_preset = commands.index("NEXT_TURN,LEFT")
-        self.assertLess(initial_line_start, first_line_stop)
-        self.assertLess(first_line_stop, first_center_advance)
-        self.assertLess(first_center_advance, first_fixed_right)
-        self.assertLess(first_fixed_right, left_preset)
+        self.assertLess(left_preset, final_center_advance)
         self.assertIn("VEL,0.00,-0.80,0.00", commands)
         self.assertIn(
             f"VEL,0.00,0.00,{TURN_TO_GRAB_OMEGA:.2f}",
@@ -211,6 +205,9 @@ class FullMissionTests(unittest.TestCase):
         self.assertIn("BUILD_ZONE_REACHED", output)
         self.assertIn("[STATE] FINISHED", output)
         self.assertIn("[MISSION]", output)
+        self.assertIn("[TURN] TURN_STARTED,RIGHT", output)
+        self.assertIn("[TURN] TURN_DONE,RIGHT", output)
+        self.assertIn("[LINE] LINE_REACQUIRED", output)
         self.assertNotIn("close", link.calls)
 
         left_preset_at = next(
@@ -232,34 +229,27 @@ class FullMissionTests(unittest.TestCase):
             SECOND_JUNCTION_DRIVE_TIME + 0.25,
         )
 
-    def test_stale_first_left_event_cannot_override_forced_right(self) -> None:
+    def test_wrong_first_turn_enters_fault_and_requests_stop(self) -> None:
         clock = FakeClock()
         link = FakeStm32Link(
             clock,
             first_line_batch=[
                 b"JUNCTION_DETECTED\r\n",
-                b"ADVANCE_START\r\n",
-                b"ADVANCE_DONE\r\n",
-                b"TURN_PHASE_START\r\n",
                 b"TURN_STARTED,LEFT\r\n",
             ],
         )
         link.is_connected = True
-
-        with mock.patch("competition.full_mission.execute_grab_steps"):
-            result = run_full_mission(
-                link,  # type: ignore[arg-type]
-                output=lambda line: None,
-                clock=clock,
-            )
-
-        self.assertIs(result, FullMissionState.FINISHED)
-        commands = _sent_commands(link)
-        self.assertIn(
-            f"VEL,0.00,0.00,{FIRST_TURN_OMEGA:.2f}",
-            commands,
+        mission = FullMission(
+            link,  # type: ignore[arg-type]
+            output=lambda line: None,
+            clock=clock,
         )
-        self.assertNotIn(("stop", False), link.calls)
+
+        with self.assertRaises(Stm32ProtocolError):
+            mission.run()
+
+        self.assertIs(mission.state, FullMissionState.FAULT)
+        self.assertIn(("stop", False), link.calls)
 
     def test_stale_final_left_event_cannot_override_forced_right(self) -> None:
         clock = FakeClock()
@@ -285,19 +275,19 @@ class FullMissionTests(unittest.TestCase):
 
         self.assertIs(result, FullMissionState.FINISHED)
         commands = _sent_commands(link)
-        self.assertEqual(commands.count("LINE_STOP"), 4)
+        self.assertEqual(commands.count("LINE_STOP"), 3)
         self.assertIn(
-            f"VEL,0.00,0.00,{FIRST_TURN_OMEGA:.2f}",
+            f"VEL,0.00,0.00,{FINAL_TURN_OMEGA:.2f}",
             commands,
         )
         self.assertIn("Force right turn at final junction", output)
         self.assertNotIn(("stop", False), link.calls)
 
     def test_fixed_route_parameters_use_current_speed_baseline(self) -> None:
-        self.assertEqual(FIRST_JUNCTION_ADVANCE_TIME, 2.2)
-        self.assertEqual(FIRST_JUNCTION_ADVANCE_SPEED, 0.80)
-        self.assertEqual(FIRST_TURN_TIME, 11.5)
-        self.assertEqual(FIRST_TURN_OMEGA, -0.80)
+        self.assertEqual(FINAL_JUNCTION_ADVANCE_TIME, 2.2)
+        self.assertEqual(FINAL_JUNCTION_ADVANCE_SPEED, 0.80)
+        self.assertEqual(FINAL_TURN_TIME, 11.5)
+        self.assertEqual(FINAL_TURN_OMEGA, -0.80)
         self.assertEqual(SECOND_JUNCTION_DISTANCE, 0.60)
         self.assertAlmostEqual(
             SECOND_JUNCTION_DRIVE_TIME,
@@ -329,7 +319,7 @@ class FullMissionTests(unittest.TestCase):
             f"VEL,0.00,0.00,{TURN_TO_GRAB_OMEGA:.2f}",
             commands,
         )
-        self.assertEqual(commands.count("LINE_STOP"), 4)
+        self.assertEqual(commands.count("LINE_STOP"), 3)
 
     def test_dry_run_never_constructs_hardware(self) -> None:
         calls = 0
