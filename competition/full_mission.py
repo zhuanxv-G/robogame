@@ -174,32 +174,7 @@ class FullMission:
         self._wait_for_junction()
         self._output("[TURN]")
         self._output("Force right turn at first junction")
-
-        # The STM32 currently lets a clear 1110/0111 side pattern override
-        # NEXT_TURN.  This route must turn RIGHT, so stop LineNav immediately
-        # after junction confirmation and reproduce its existing 2.2 s
-        # center advance plus fixed RIGHT turn with explicit VEL commands.
-        self._send_with_ack("LINE_STOP")
-        self._output(
-            "[TURN] Advance to center "
-            f"({FIRST_JUNCTION_ADVANCE_TIME:.2f} s)"
-        )
-        self._drive_timed_velocity(
-            y=FIRST_JUNCTION_ADVANCE_SPEED,
-            omega=0.0,
-            duration_s=FIRST_JUNCTION_ADVANCE_TIME,
-            stop_label="full_mission_first_junction_center",
-        )
-        self._output(
-            "[TURN] Fixed right turn "
-            f"(omega={FIRST_TURN_OMEGA:+.2f}, {FIRST_TURN_TIME:.2f} s)"
-        )
-        self._drive_timed_velocity(
-            y=0.0,
-            omega=FIRST_TURN_OMEGA,
-            duration_s=FIRST_TURN_TIME,
-            stop_label="full_mission_first_right_turn",
-        )
+        self._force_right_turn("first_junction")
 
         # Re-enter LineNav after the forced turn.  Keep LEFT preset as a safe
         # fallback if the close second junction is detected after all;
@@ -342,9 +317,8 @@ class FullMission:
 
     def _run_turn_to_build(self) -> None:
         self._output("[TURN]")
-        self._output("Right turn")
-        self._wait_for_turn(NextTurn.RIGHT)
-        self._stop_confirmed("full_mission_build_zone")
+        self._output("Force right turn at final junction")
+        self._force_right_turn("build_junction")
         self._output("BUILD_ZONE_REACHED")
         self._set_state(FullMissionState.FINISHED)
 
@@ -450,6 +424,34 @@ class FullMission:
                 )
 
     # --- shared motion and safety helpers ---
+
+    def _force_right_turn(self, label: str) -> None:
+        """Stop LineNav, advance to junction center, then turn RIGHT."""
+        # A clear 1110/0111 side pattern can override NEXT_TURN in the STM32.
+        # The fixed route requires RIGHT at both outer junctions, so the Pi
+        # owns these two maneuvers after JUNCTION_DETECTED.  Both locations
+        # deliberately share the current calibrated timing parameters.
+        self._send_with_ack("LINE_STOP")
+        self._output(
+            "[TURN] Advance to center "
+            f"({FIRST_JUNCTION_ADVANCE_TIME:.2f} s)"
+        )
+        self._drive_timed_velocity(
+            y=FIRST_JUNCTION_ADVANCE_SPEED,
+            omega=0.0,
+            duration_s=FIRST_JUNCTION_ADVANCE_TIME,
+            stop_label=f"full_mission_{label}_center",
+        )
+        self._output(
+            "[TURN] Fixed right turn "
+            f"(omega={FIRST_TURN_OMEGA:+.2f}, {FIRST_TURN_TIME:.2f} s)"
+        )
+        self._drive_timed_velocity(
+            y=0.0,
+            omega=FIRST_TURN_OMEGA,
+            duration_s=FIRST_TURN_TIME,
+            stop_label=f"full_mission_{label}_right_turn",
+        )
 
     def _wait_wall_approach(self, deadline: float) -> None:
         while self._clock() < deadline:
@@ -574,14 +576,15 @@ def _default_stm32_factory() -> Stm32Link:
 def _print_plan(output: Callable[[str], object]) -> None:
     output("RoboGame FULL FIXED ROUTE MISSION")
     output(
-        "route=RIGHT -> fixed 0.60 m -> LEFT -> GRAB "
-        "-> fixed RIGHT -> RIGHT -> BUILD"
+        "route=forced RIGHT -> fixed 0.60 m -> LEFT -> GRAB "
+        "-> fixed RIGHT -> forced RIGHT -> BUILD"
     )
     output(f"grab_line_approach={TARGET_DISTANCE:.2f} m")
     output(f"first_junction_advance_time={FIRST_JUNCTION_ADVANCE_TIME:.2f} s")
     output(f"first_junction_advance_speed={FIRST_JUNCTION_ADVANCE_SPEED:.2f}")
     output(f"first_fixed_right_time={FIRST_TURN_TIME:.2f} s")
     output(f"first_fixed_right_omega={FIRST_TURN_OMEGA:.2f} rad/s")
+    output("final_junction_mode=forced_right (shares first-junction timing)")
     output(f"first_to_second_junction={SECOND_JUNCTION_DISTANCE:.2f} m")
     output(f"second_junction_drive_time={SECOND_JUNCTION_DRIVE_TIME:.2f} s")
     output(f"fixed_left_turn_time={TURN_TO_GRAB_TIME:.2f} s")

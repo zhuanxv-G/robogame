@@ -61,6 +61,7 @@ class FakeStm32Link:
         *,
         first_line_batch: list[bytes] | None = None,
         second_line_batch: list[bytes] | None = None,
+        final_line_batch: list[bytes] | None = None,
         interrupt_when_empty: bool = False,
     ) -> None:
         self.clock = clock
@@ -76,6 +77,11 @@ class FakeStm32Link:
         )
         self.second_line_batch = (
             [] if second_line_batch is None else second_line_batch
+        )
+        self.final_line_batch = (
+            [b"JUNCTION_DETECTED\r\n"]
+            if final_line_batch is None
+            else final_line_batch
         )
         self.interrupt_when_empty = interrupt_when_empty
 
@@ -98,7 +104,7 @@ class FakeStm32Link:
             elif self.line_start_count == 2:
                 self.lines.extend(self.second_line_batch)
             elif self.line_start_count == 4:
-                self.lines.extend(_turn_lines("RIGHT"))
+                self.lines.extend(self.final_line_batch)
         return command
 
     def wait_ack(self, command: str, timeout: float = 2.0) -> str:
@@ -159,7 +165,7 @@ class FullMissionTests(unittest.TestCase):
             ["NEXT_TURN,RIGHT", "NEXT_TURN,LEFT", "NEXT_TURN,RIGHT"],
         )
         self.assertEqual(commands.count("LINE_START"), 4)
-        self.assertEqual(commands.count("LINE_STOP"), 3)
+        self.assertEqual(commands.count("LINE_STOP"), 4)
         self.assertIn(
             f"VEL,0.00,{FIRST_JUNCTION_ADVANCE_SPEED:.2f},0.00",
             commands,
@@ -255,6 +261,38 @@ class FullMissionTests(unittest.TestCase):
         )
         self.assertNotIn(("stop", False), link.calls)
 
+    def test_stale_final_left_event_cannot_override_forced_right(self) -> None:
+        clock = FakeClock()
+        link = FakeStm32Link(
+            clock,
+            final_line_batch=[
+                b"JUNCTION_DETECTED\r\n",
+                b"ADVANCE_START\r\n",
+                b"ADVANCE_DONE\r\n",
+                b"TURN_PHASE_START\r\n",
+                b"TURN_STARTED,LEFT\r\n",
+            ],
+        )
+        link.is_connected = True
+        output: list[str] = []
+
+        with mock.patch("competition.full_mission.execute_grab_steps"):
+            result = run_full_mission(
+                link,  # type: ignore[arg-type]
+                output=output.append,
+                clock=clock,
+            )
+
+        self.assertIs(result, FullMissionState.FINISHED)
+        commands = _sent_commands(link)
+        self.assertEqual(commands.count("LINE_STOP"), 4)
+        self.assertIn(
+            f"VEL,0.00,0.00,{FIRST_TURN_OMEGA:.2f}",
+            commands,
+        )
+        self.assertIn("Force right turn at final junction", output)
+        self.assertNotIn(("stop", False), link.calls)
+
     def test_fixed_route_parameters_use_current_speed_baseline(self) -> None:
         self.assertEqual(FIRST_JUNCTION_ADVANCE_TIME, 2.2)
         self.assertEqual(FIRST_JUNCTION_ADVANCE_SPEED, 0.80)
@@ -291,7 +329,7 @@ class FullMissionTests(unittest.TestCase):
             f"VEL,0.00,0.00,{TURN_TO_GRAB_OMEGA:.2f}",
             commands,
         )
-        self.assertEqual(commands.count("LINE_STOP"), 3)
+        self.assertEqual(commands.count("LINE_STOP"), 4)
 
     def test_dry_run_never_constructs_hardware(self) -> None:
         calls = 0
